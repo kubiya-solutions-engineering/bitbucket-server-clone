@@ -26,6 +26,17 @@ def get_bitbucket_server_url() -> str:
     logger.info(f"Using Bitbucket server URL: {url}")
     return url
 
+def get_bitbucket_auth() -> tuple:
+    """Get Bitbucket username and password from environment (same as JIRA)"""
+    creds = os.getenv("JIRA_USER_CREDS")
+    if not creds:
+        raise ValueError("JIRA_USER_CREDS environment variable must be set (format: username:password)")
+    try:
+        username, password = creds.split(":", 1)
+        return (username, password)
+    except ValueError:
+        raise ValueError("JIRA_USER_CREDS must be in format 'username:password'")
+
 def get_bitbucket_headers() -> dict:
     """Get basic headers for Bitbucket API requests"""
     return {
@@ -110,11 +121,12 @@ def setup_client_cert_files():
         raise
 
 def test_bitbucket_connection():
-    """Test the Bitbucket connection with current client certificate"""
+    """Test the Bitbucket connection with dual authentication (client certificate + basic auth)"""
     try:
         logger.info("\n=== Testing Bitbucket Connection ===")
         server_url = get_bitbucket_server_url()
         cert_path, key_path = setup_client_cert_files()
+        auth = get_bitbucket_auth()  # Add basic auth like JIRA
         
         # Try to access the application properties endpoint (basic info endpoint)
         test_url = f"{server_url}/rest/api/1.0/application-properties"
@@ -122,11 +134,13 @@ def test_bitbucket_connection():
         
         headers = get_bitbucket_headers()
         logger.info(f"Request headers: {headers}")
+        logger.info(f"Using dual authentication: client cert + basic auth")
         
         logger.info("Making test request...")
         response = requests.get(
             test_url,
             headers=headers,
+            auth=auth,  # Add basic auth like JIRA
             cert=(cert_path, key_path),
             verify=False  # Typically self-signed cert for internal Bitbucket
         )
@@ -172,25 +186,22 @@ def test_bitbucket_connection():
         return False
 
 # ============================================================================
-# REST API FUNCTIONS (RESTRICTED FOR THIS CUSTOMER)
+# REST API FUNCTIONS (NOW USING DUAL AUTHENTICATION LIKE JIRA)
 # ============================================================================
-# The following functions use REST API endpoints that are restricted for this
-# customer setup. They are kept for compatibility but will likely return 401 errors.
-# Use Git HTTPS transport operations instead for actual repository work.
 
 def get_bitbucket_user() -> dict:
-    """Get the authenticated user information from Bitbucket 
-    WARNING: REST API access is restricted for this customer"""
+    """Get the authenticated user information from Bitbucket using dual authentication"""
     server_url = get_bitbucket_server_url()
-    user_url = f"{server_url}/rest/api/1.0/users?filter={{0}}"  # Get current user - will need to be adjusted based on auth
     cert_path, key_path = setup_client_cert_files()
+    auth = get_bitbucket_auth()  # Add basic auth
 
     try:
         response = requests.get(
             f"{server_url}/rest/api/1.0/users",
             cert=(cert_path, key_path),
+            auth=auth,  # Add basic auth
             headers=get_bitbucket_headers(),
-            verify=False,  # Likely self-signed cert for internal server
+            verify=False,
             params={"limit": 1}  # Just get one user to test
         )
         response.raise_for_status()
@@ -204,16 +215,17 @@ def get_bitbucket_user() -> dict:
         raise RuntimeError(f"Failed to get user data: {e}")
 
 def list_bitbucket_projects() -> list:
-    """List all projects from Bitbucket
-    WARNING: REST API access is restricted for this customer"""
+    """List all projects from Bitbucket using dual authentication"""
     server_url = get_bitbucket_server_url()
     cert_path, key_path = setup_client_cert_files()
+    auth = get_bitbucket_auth()  # Add basic auth
     projects_url = f"{server_url}/rest/api/1.0/projects"
 
     try:
         response = requests.get(
             projects_url,
             cert=(cert_path, key_path),
+            auth=auth,  # Add basic auth
             headers=get_bitbucket_headers(),
             verify=False
         )
@@ -229,10 +241,10 @@ def list_bitbucket_projects() -> list:
         raise RuntimeError(f"Failed to list projects: {e}")
 
 def list_bitbucket_repos(project_key: str = None) -> list:
-    """List repositories from Bitbucket
-    WARNING: REST API access is restricted for this customer"""
+    """List repositories from Bitbucket using dual authentication"""
     server_url = get_bitbucket_server_url()
     cert_path, key_path = setup_client_cert_files()
+    auth = get_bitbucket_auth()  # Add basic auth
     
     if project_key:
         repos_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos"
@@ -245,6 +257,7 @@ def list_bitbucket_repos(project_key: str = None) -> list:
         response = requests.get(
             repos_url,
             cert=(cert_path, key_path),
+            auth=auth,  # Add basic auth
             headers=get_bitbucket_headers(),
             verify=False
         )
@@ -260,16 +273,17 @@ def list_bitbucket_repos(project_key: str = None) -> list:
         raise RuntimeError(f"Failed to list repositories: {e}")
 
 def get_bitbucket_repo(project_key: str, repo_slug: str) -> dict:
-    """Get information about a specific Bitbucket repository
-    WARNING: REST API access is restricted for this customer"""
+    """Get information about a specific Bitbucket repository using dual authentication"""
     server_url = get_bitbucket_server_url()
     repo_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}"
     cert_path, key_path = setup_client_cert_files()
+    auth = get_bitbucket_auth()  # Add basic auth
 
     try:
         response = requests.get(
             repo_url,
             cert=(cert_path, key_path),
+            auth=auth,  # Add basic auth
             headers=get_bitbucket_headers(),
             verify=False
         )
@@ -284,16 +298,17 @@ def get_bitbucket_repo(project_key: str, repo_slug: str) -> dict:
         raise RuntimeError(f"Failed to get repository data: {e}")
 
 def get_bitbucket_branches(project_key: str, repo_slug: str) -> list:
-    """Get branches for a specific Bitbucket repository
-    WARNING: REST API access is restricted for this customer"""
+    """Get branches for a specific Bitbucket repository using dual authentication"""
     server_url = get_bitbucket_server_url()
     branches_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}/branches"
     cert_path, key_path = setup_client_cert_files()
+    auth = get_bitbucket_auth()  # Add basic auth
 
     try:
         response = requests.get(
             branches_url,
             cert=(cert_path, key_path),
+            auth=auth,  # Add basic auth
             headers=get_bitbucket_headers(),
             verify=False
         )
@@ -309,11 +324,11 @@ def get_bitbucket_branches(project_key: str, repo_slug: str) -> list:
         raise RuntimeError(f"Failed to get branches: {e}")
 
 def get_bitbucket_commits(project_key: str, repo_slug: str, branch: str = "master", limit: int = 25) -> list:
-    """Get commits for a specific Bitbucket repository branch
-    WARNING: REST API access is restricted for this customer"""
+    """Get commits for a specific Bitbucket repository branch using dual authentication"""
     server_url = get_bitbucket_server_url()
     commits_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}/commits"
     cert_path, key_path = setup_client_cert_files()
+    auth = get_bitbucket_auth()  # Add basic auth
 
     params = {
         "until": branch,
@@ -324,6 +339,7 @@ def get_bitbucket_commits(project_key: str, repo_slug: str, branch: str = "maste
         response = requests.get(
             commits_url,
             cert=(cert_path, key_path),
+            auth=auth,  # Add basic auth
             headers=get_bitbucket_headers(),
             params=params,
             verify=False
@@ -344,14 +360,14 @@ def get_bitbucket_commits(project_key: str, repo_slug: str, branch: str = "maste
 # ============================================================================
 
 def example_usage():
-    """Example of how to use the Bitbucket functions (REST API functions likely won't work)"""
+    """Example of how to use the Bitbucket functions (now with dual authentication)"""
     try:
         # Test connection
         if not test_bitbucket_connection():
             logger.error("Bitbucket connection test failed")
             return
         
-        # List projects (likely to fail with 401)
+        # List projects (should work better now with dual auth)
         projects = list_bitbucket_projects()
         print(f"Found {len(projects)} projects")
         for project in projects[:3]:  # Show first 3
@@ -380,26 +396,17 @@ def setup_git_with_dual_auth():
     server_url = get_bitbucket_server_url()
     domain = "api.cip.audi.de"
     
-    # Try to get user credentials from environment
-    user_email = os.getenv("KUBIYA_USER_EMAIL", "")
-    user_creds = os.getenv("JIRA_USER_CREDS", "")  # Format: "username:password"
+    # Get user credentials from environment (same as other functions now)
+    try:
+        username, password = get_bitbucket_auth()
+        logger.info(f"Got credentials for user: {username}")
+    except Exception as e:
+        logger.warning(f"Could not get credentials: {e}")
+        username, password = "", ""
     
     logger.info("Setting up Git with dual authentication (client cert + basic auth)")
-    logger.info(f"User email from env: {user_email}")
-    logger.info(f"User credentials available: {bool(user_creds)}")
-    
-    # Parse user credentials if available
-    username, password = "", ""
-    if user_creds and ":" in user_creds:
-        try:
-            username, password = user_creds.split(":", 1)
-            logger.info(f"Parsed username: {username}")
-        except:
-            logger.warning("Could not parse JIRA_USER_CREDS")
-    elif user_email:
-        # Use email as username if no explicit credentials
-        username = user_email.split("@")[0] if "@" in user_email else user_email
-        logger.info(f"Using email-derived username: {username}")
+    logger.info(f"Username: {username}")
+    logger.info(f"Password available: {bool(password)}")
     
     # Configure Git with client certificates
     git_configs = [
@@ -461,6 +468,7 @@ def test_git_dual_auth(project_key, repo_slug):
     """
     Test Git access with dual authentication setup
     """
+    import subprocess
     server_url = get_bitbucket_server_url()
     git_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
     
@@ -470,6 +478,12 @@ def test_git_dual_auth(project_key, repo_slug):
     try:
         # Set up dual authentication
         cert_path, key_path, username, password = setup_git_with_dual_auth()
+        
+        logger.info(f"Dual auth setup complete:")
+        logger.info(f"  - Cert path: {cert_path}")
+        logger.info(f"  - Key path: {key_path}")
+        logger.info(f"  - Username: {username}")
+        logger.info(f"  - Password length: {len(password) if password else 0}")
         
         # Prepare environment
         git_env = {
@@ -484,6 +498,7 @@ def test_git_dual_auth(project_key, repo_slug):
             # Add credentials to URL for this test
             auth_url = git_url.replace("https://", f"https://{username}:{password}@")
             logger.info("Testing with embedded credentials in URL")
+            logger.info(f"Auth URL format: https://{username}:{'*' * len(password)}@{git_url[8:]}")
             
             result = subprocess.run(
                 ["git", "ls-remote", "--heads", auth_url],
@@ -492,6 +507,17 @@ def test_git_dual_auth(project_key, repo_slug):
                 timeout=30,
                 env=git_env
             )
+            
+            logger.info(f"Git command result:")
+            logger.info(f"  - Return code: {result.returncode}")
+            logger.info(f"  - STDOUT length: {len(result.stdout)}")
+            logger.info(f"  - STDERR length: {len(result.stderr)}")
+            
+            if result.stdout:
+                logger.info(f"  - STDOUT preview: {result.stdout[:200]}...")
+            if result.stderr:
+                logger.info(f"  - STDERR preview: {result.stderr[:200]}...")
+                
         else:
             logger.info("Testing without credentials (will likely fail)")
             result = subprocess.run(
@@ -504,16 +530,42 @@ def test_git_dual_auth(project_key, repo_slug):
         
         if result.returncode == 0:
             branches = result.stdout.strip().split('\n') if result.stdout.strip() else []
-            logger.info(f"Success! Found {len(branches)} branches")
+            logger.info(f"SUCCESS! Found {len(branches)} branches")
             return True, branches
         else:
-            logger.error(f"Git failed: {result.stderr}")
-            if "401" in result.stderr:
-                logger.error("Still receiving 401 - check credentials or server configuration")
+            logger.error(f"Git authentication failed:")
+            logger.error(f"Return code: {result.returncode}")
+            logger.error(f"STDERR: {result.stderr}")
+            
+            # Enhanced error analysis
+            stderr = result.stderr.lower()
+            if "401" in stderr or "unauthorized" in stderr:
+                logger.error("❌ Authentication Error (401)")
+                if "username" in stderr or "password" in stderr:
+                    logger.error("💡 Server rejected the username/password")
+                    logger.error("💡 Possible issues:")
+                    logger.error("   - Incorrect password")
+                    logger.error("   - Username format issue (try full email instead)")
+                    logger.error("   - Account locked or disabled")
+                    logger.error("   - Different authentication method required")
+            elif "403" in stderr or "forbidden" in stderr:
+                logger.error("❌ Authorization Error (403)")
+                logger.error("💡 User authenticated but lacks repository access")
+            elif "404" in stderr or "not found" in stderr:
+                logger.error("❌ Repository Not Found (404)")
+                logger.error("💡 Check project key and repository slug")
+            elif "timeout" in stderr:
+                logger.error("❌ Network Timeout")
+            elif "ssl" in stderr or "certificate" in stderr:
+                logger.error("❌ SSL/Certificate Error")
+                logger.error("💡 Issue with client certificate setup")
+            else:
+                logger.error("❌ Unknown error - see full stderr above")
+            
             return False, []
             
     except Exception as e:
-        logger.error(f"Git dual auth test failed: {e}")
+        logger.error(f"Git dual auth test failed with exception: {e}")
         return False, []
 
 if __name__ == "__main__":
