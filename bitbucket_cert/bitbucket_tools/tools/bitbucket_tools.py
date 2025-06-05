@@ -4,28 +4,6 @@ from kubiya_sdk.tools import Arg, FileSpec
 from ..base import BitBucketCertTool, register_bitbucket_tool
 from . import clone_repo, github_funcs
 
-# Clone repository tool
-clone_repo_tool = BitBucketCertTool(
-    name="clone_repo",
-    description="Clone a repository from Bitbucket Server using client certificate authentication",
-    content="""python /tmp/clone_repo.py "{{ .project_key }}" "{{ .repo_slug }}" --destination="{{ .destination }}" --branch="{{ .branch }}" """,
-    args=[
-        Arg(name="project_key", type="str", description="Project key (e.g., EOCCJPA)", required=True),
-        Arg(name="repo_slug", type="str", description="Repository slug (e.g., kubikaos)", required=True),
-        Arg(name="destination", type="str", description="Local directory to clone into (defaults to repo name)", required=False),
-        Arg(name="branch", type="str", description="Specific branch to clone", required=False),
-    ],
-    with_files=[
-        FileSpec(
-            destination="/tmp/clone_repo.py",
-            content=inspect.getsource(clone_repo),
-        ),
-        FileSpec(
-            destination="/tmp/github_funcs.py",
-            content=inspect.getsource(github_funcs),
-        )
-    ])
-
 # List repositories tool
 list_repos_tool = BitBucketCertTool(
     name="list_bitbucket_repos",
@@ -758,181 +736,13 @@ if __name__ == "__main__":
         )
     ])
 
-# Migrate repository tool - Clone from Bitbucket and push to GitHub
+# Migration tool - Clone from Bitbucket and migrate to GitHub
 migrate_repo_tool = BitBucketCertTool(
-    name="migrate_bitbucket_to_github",
-    description="Clone a repository from Bitbucket and migrate it to GitHub",
-    content="""python /tmp/migrate_repo.py "{{ .project_key }}" "{{ .repo_slug }}" "{{ .github_repo_url }}" "{{ .github_token }}" --temp-dir="{{ .temp_dir }}" --branch="{{ .branch }}" """,
-    args=[
-        Arg(name="project_key", type="str", description="Bitbucket project key (e.g., kubika2)", required=True),
-        Arg(name="repo_slug", type="str", description="Bitbucket repository slug (e.g., kubikaos)", required=True),
-        Arg(name="github_repo_url", type="str", description="Destination GitHub repository URL where the Bitbucket repo will be migrated to (e.g., https://github.com/kubiyabot/audi-qa)", required=True),
-        Arg(name="github_token", type="str", description="GitHub personal access token for authentication", required=True),
-        Arg(name="temp_dir", type="str", description="Temporary directory for cloning (defaults to /tmp/migration)", required=False),
-        Arg(name="branch", type="str", description="Specific branch to migrate (defaults to all branches)", required=False),
-    ],
+    name="migrate_audi_repo",
+    description="Migrate kubika2/kubikaos from Bitbucket to a new branch in kubiyabot/audi-qa on GitHub",
+    content="python /tmp/clone_repo.py",
+    args=[],  # No arguments needed - everything is hard-coded
     with_files=[
-        FileSpec(
-            destination="/tmp/migrate_repo.py",
-            content="""#!/usr/bin/env python3
-import sys
-import os
-import subprocess
-import shutil
-import tempfile
-sys.path.append('/tmp')
-
-from github_funcs import test_bitbucket_connection
-from clone_repo import clone_repository
-
-def run_command(cmd, cwd=None, capture_output=False):
-    \"\"\"Run a shell command and handle errors\"\"\"
-    print(f"Running: {' '.join(cmd) if isinstance(cmd, list) else cmd}")
-    try:
-        if capture_output:
-            result = subprocess.run(cmd, shell=isinstance(cmd, str), cwd=cwd, 
-                                  capture_output=True, text=True, check=True)
-            return result.stdout.strip()
-        else:
-            subprocess.run(cmd, shell=isinstance(cmd, str), cwd=cwd, check=True)
-            return True
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Command failed: {e}")
-        if capture_output and e.stdout:
-            print(f"stdout: {e.stdout}")
-        if capture_output and e.stderr:
-            print(f"stderr: {e.stderr}")
-        return False
-
-def main():
-    if len(sys.argv) < 5:
-        print("❌ Project key, repo slug, GitHub repo URL, and GitHub token are required")
-        print("Usage: migrate_repo.py <project_key> <repo_slug> <github_repo_url> <github_token> [--temp-dir=<dir>] [--branch=<branch>]")
-        sys.exit(1)
-    
-    project_key = sys.argv[1]
-    repo_slug = sys.argv[2]
-    github_repo_url = sys.argv[3]
-    github_token = sys.argv[4]
-    
-    # Parse optional arguments
-    temp_dir = "/tmp/migration"
-    branch = None
-    
-    for arg in sys.argv[5:]:
-        if arg.startswith("--temp-dir="):
-            temp_dir = arg.split("=", 1)[1]
-            if temp_dir == "<no value>":
-                temp_dir = "/tmp/migration"
-        elif arg.startswith("--branch="):
-            branch = arg.split("=", 1)[1]
-            if branch == "<no value>":
-                branch = None
-    
-    print(f"🚀 Starting migration: {project_key}/{repo_slug} -> {github_repo_url}")
-    print("=" * 60)
-    
-    # Test Bitbucket connection
-    if not test_bitbucket_connection():
-        print("❌ Failed to establish connection to Bitbucket. Please check your configuration.")
-        sys.exit(1)
-    
-    # Create temporary directory
-    if os.path.exists(temp_dir):
-        print(f"🧹 Cleaning up existing directory: {temp_dir}")
-        shutil.rmtree(temp_dir)
-    
-    os.makedirs(temp_dir, exist_ok=True)
-    repo_dir = os.path.join(temp_dir, repo_slug)
-    
-    try:
-        print(f"📥 Step 1: Cloning from Bitbucket...")
-        
-        # Use the existing clone_repository function
-        success = clone_repository(project_key, repo_slug, destination=repo_dir, branch=branch)
-        if not success:
-            print("❌ Failed to clone repository from Bitbucket")
-            sys.exit(1)
-        
-        print("✅ Successfully cloned from Bitbucket")
-        
-        # Change to repository directory
-        os.chdir(repo_dir)
-        
-        print(f"🔧 Step 2: Configuring Git remotes...")
-        
-        # Remove existing origin remote
-        run_command(["git", "remote", "remove", "origin"])
-        
-        # Add GitHub remote with token authentication
-        if github_token and not github_repo_url.startswith("https://"):
-            print("❌ GitHub repo URL must start with https://")
-            sys.exit(1)
-        
-        # Insert token into GitHub URL
-        if "github.com" in github_repo_url:
-            github_auth_url = github_repo_url.replace("https://", f"https://{github_token}@")
-        else:
-            print("❌ Only GitHub.com repositories are supported")
-            sys.exit(1)
-        
-        run_command(["git", "remote", "add", "origin", github_auth_url])
-        
-        print("✅ Git remotes configured")
-        
-        print(f"📤 Step 3: Pushing to GitHub...")
-        
-        # Get all branches
-        if branch:
-            # Push specific branch
-            run_command(["git", "push", "-u", "origin", branch])
-            print(f"✅ Pushed branch: {branch}")
-        else:
-            # Push all branches
-            branches_output = run_command(["git", "branch", "-r"], capture_output=True)
-            if branches_output:
-                remote_branches = []
-                for line in branches_output.split('\\n'):
-                    line = line.strip()
-                    if line and not line.startswith('origin/HEAD') and line.startswith('origin/'):
-                        branch_name = line.replace('origin/', '')
-                        remote_branches.append(branch_name)
-                
-                print(f"Found {len(remote_branches)} branches to push")
-                
-                # Push each branch
-                for branch_name in remote_branches:
-                    print(f"Pushing branch: {branch_name}")
-                    run_command(["git", "checkout", "-b", branch_name, f"origin/{branch_name}"])
-                    run_command(["git", "push", "-u", "origin", branch_name])
-            
-            # Push all tags
-            run_command(["git", "push", "origin", "--tags"])
-            print("✅ Pushed all branches and tags")
-        
-        print(f"🎉 Step 4: Migration completed successfully!")
-        print(f"Repository migrated from Bitbucket to: {github_repo_url}")
-        
-        # Clean up temporary directory
-        os.chdir("/tmp")
-        shutil.rmtree(temp_dir)
-        print(f"🧹 Cleaned up temporary directory: {temp_dir}")
-        
-    except Exception as e:
-        print(f"❌ Migration failed: {e}")
-        # Clean up on failure
-        try:
-            os.chdir("/tmp")
-            if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
-        except:
-            pass
-        sys.exit(1)
-
-if __name__ == "__main__":
-    main()
-""",
-        ),
         FileSpec(
             destination="/tmp/clone_repo.py",
             content=inspect.getsource(clone_repo),
@@ -946,7 +756,6 @@ if __name__ == "__main__":
 # Register all tools
 [
     register_bitbucket_tool(tool) for tool in [
-        clone_repo_tool,
         list_repos_tool,
         test_bitbucket_tool,
         get_repo_info_tool,

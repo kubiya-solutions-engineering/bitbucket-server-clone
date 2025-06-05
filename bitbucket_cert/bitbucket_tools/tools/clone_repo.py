@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
-Clone repository from Bitbucket Server using client certificate authentication.
-Updated to handle dual authentication (client certificates + basic auth).
+Migrate repository from Bitbucket Server to GitHub.
+Clones from https://api.cip.audi.de/bitbucket/scm/kubika2/kubikaos.git
+and pushes to a new branch in https://github.com/kubiyabot/audi-qa.git
 """
 
 import subprocess
 import sys
 import os
 import shutil
+import tempfile
+from datetime import datetime
 sys.path.append('/tmp')
 
 from github_funcs import (
@@ -16,52 +19,87 @@ from github_funcs import (
     test_bitbucket_connection
 )
 
-def clone_repository(project_key: str, repo_slug: str, destination: str = None, branch: str = None) -> bool:
+# Hard-coded repository URLs
+BITBUCKET_REPO = "https://api.cip.audi.de/bitbucket/scm/kubika2/kubikaos.git"
+GITHUB_REPO = "https://github.com/kubiyabot/audi-qa.git"
+
+def run_git_command(cmd, cwd=None, timeout=300):
+    """Run a git command and return success status and output"""
+    try:
+        print(f"🔧 Running: {' '.join(cmd)}")
+        result = subprocess.run(
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout
+        )
+        
+        if result.returncode == 0:
+            return True, result.stdout
+        else:
+            print(f"❌ Command failed: {result.stderr}")
+            return False, result.stderr
+            
+    except subprocess.TimeoutExpired:
+        print(f"❌ Command timed out after {timeout}s")
+        return False, "Timeout"
+    except Exception as e:
+        print(f"❌ Command error: {e}")
+        return False, str(e)
+
+def migrate_bitbucket_to_github():
     """
-    Clone a repository from Bitbucket Server using dual authentication.
-    
-    Args:
-        project_key: The project key (e.g., kubika2)
-        repo_slug: The repository slug (e.g., kubikaos)
-        destination: Local directory to clone into (defaults to repo_slug)
-        branch: Specific branch to clone (optional)
-    
-    Returns:
-        bool: True if successful, False otherwise
+    Complete migration from Bitbucket to GitHub:
+    1. Clone from Bitbucket (kubika2/kubikaos)
+    2. Create new branch in GitHub (kubiyabot/audi-qa)
+    3. Push all content to the new branch
     """
-    print(f"🔄 Cloning {project_key}/{repo_slug} from Bitbucket...")
+    print("🚀 Starting Bitbucket to GitHub Migration")
+    print("=" * 50)
+    print(f"📥 Source: {BITBUCKET_REPO}")
+    print(f"📤 Target: {GITHUB_REPO}")
+    print("=" * 50)
     
-    # Test connection first
+    # Test Bitbucket connection first
     if not test_bitbucket_connection():
         print("❌ Failed to establish connection to Bitbucket")
         return False
     
+    # Get GitHub token
+    github_token = os.getenv("GH_KUBIYA_TOKEN")
+    if not github_token:
+        print("❌ GH_KUBIYA_TOKEN environment variable not set")
+        return False
+    
+    print("✅ GitHub token available")
+    
+    # Create temporary directory for migration
+    temp_dir = tempfile.mkdtemp(prefix="audi_migration_")
+    repo_dir = os.path.join(temp_dir, "kubikaos")
+    
     try:
-        # Set up dual authentication
+        print(f"📁 Working directory: {temp_dir}")
+        
+        # Step 1: Set up dual authentication for Bitbucket
+        print("\n🔐 Step 1: Setting up Bitbucket authentication...")
         cert_path, key_path, username, password = setup_git_with_dual_auth()
         
-        # Construct Git URL
-        server_url = get_bitbucket_server_url()
-        git_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
+        if not username or not password:
+            print("❌ Bitbucket credentials not available")
+            return False
         
-        # If we have username/password, embed them in the URL for authentication
-        if username and password:
-            print(f"🔐 Using dual authentication: client certificates + basic auth")
-            auth_git_url = git_url.replace("https://", f"https://{username}:{password}@")
-        else:
-            print(f"⚠️ Using client certificates only (may fail if server requires basic auth)")
-            auth_git_url = git_url
+        print(f"✅ Bitbucket authentication ready for user: {username}")
         
-        # Set destination directory
-        if not destination:
-            destination = repo_slug
+        # Step 2: Clone from Bitbucket with authentication
+        print("\n📥 Step 2: Cloning from Bitbucket...")
         
-        # Clean up existing directory if it exists
-        if os.path.exists(destination):
-            print(f"🧹 Removing existing directory: {destination}")
-            shutil.rmtree(destination)
+        # Create authenticated Bitbucket URL
+        auth_bitbucket_url = BITBUCKET_REPO.replace(
+            "https://", f"https://{username}:{password}@"
+        )
         
-        # Prepare environment for Git
+        # Set up Git environment for Bitbucket
         git_env = {
             **os.environ,
             "GIT_TERMINAL_PROMPT": "0",
@@ -70,125 +108,174 @@ def clone_repository(project_key: str, repo_slug: str, destination: str = None, 
             "GIT_SSL_KEY": key_path,
         }
         
-        # Build git clone command
-        clone_cmd = ["git", "clone"]
-        
-        if branch:
-            clone_cmd.extend(["--branch", branch])
-            print(f"📋 Cloning specific branch: {branch}")
-        
-        clone_cmd.extend([auth_git_url, destination])
-        
-        print(f"📥 Executing: git clone {git_url} {destination}")
-        if branch:
-            print(f"   Branch: {branch}")
-        
-        # Execute clone
-        result = subprocess.run(
-            clone_cmd,
-            env=git_env,
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minute timeout for large repos
+        # Clone from Bitbucket
+        success, output = run_git_command(
+            ["git", "clone", "--mirror", auth_bitbucket_url, repo_dir],
+            timeout=600  # 10 minutes for large repos
         )
         
-        if result.returncode == 0:
-            print(f"✅ Successfully cloned to: {destination}")
-            
-            # Get some info about the cloned repository
-            try:
-                # Count files (excluding .git)
-                file_count = 0
-                for root, dirs, files in os.walk(destination):
-                    if '.git' not in root:
-                        file_count += len(files)
-                
-                print(f"📊 Repository contains approximately {file_count} files")
-                
-                # Get current branch
-                branch_result = subprocess.run(
-                    ["git", "branch", "--show-current"],
-                    cwd=destination,
-                    capture_output=True,
-                    text=True
-                )
-                
-                if branch_result.returncode == 0:
-                    current_branch = branch_result.stdout.strip()
-                    print(f"📍 Current branch: {current_branch}")
-                
-            except Exception as e:
-                print(f"⚠️ Could not get repository info: {e}")
-            
-            return True
-        else:
-            print(f"❌ Clone failed!")
-            print(f"Error: {result.stderr}")
-            
-            # Provide helpful error diagnosis
-            if "401" in result.stderr:
-                print("💡 Authentication failed - this indicates:")
-                if username and password:
-                    print("   - Client certificates work but credentials may be incorrect")
-                    print("   - Check JIRA_USER_CREDS format: 'username:password'")
-                else:
-                    print("   - Server requires username/password in addition to client certificates")
-                    print("   - Set JIRA_USER_CREDS environment variable")
-            elif "timeout" in result.stderr.lower():
-                print("💡 Operation timed out - the repository may be very large")
-            elif "not found" in result.stderr.lower():
-                print("💡 Repository not found - check project key and repository slug")
-            
+        if not success:
+            print(f"❌ Failed to clone from Bitbucket: {output}")
             return False
+        
+        print("✅ Successfully cloned from Bitbucket")
+        
+        # Step 3: Configure for GitHub
+        print("\n🔧 Step 3: Configuring for GitHub...")
+        
+        # Change to repo directory
+        os.chdir(repo_dir)
+        
+        # Create authenticated GitHub URL
+        auth_github_url = GITHUB_REPO.replace(
+            "https://", f"https://{github_token}@"
+        )
+        
+        # Set up standard Git environment (no client certs for GitHub)
+        github_git_env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+        }
+        
+        # Step 4: Add GitHub remote and fetch
+        print("\n🌐 Step 4: Setting up GitHub remote...")
+        
+        # Add GitHub as origin remote
+        success, output = run_git_command(
+            ["git", "remote", "add", "github", auth_github_url]
+        )
+        
+        if not success:
+            print(f"❌ Failed to add GitHub remote: {output}")
+            return False
+        
+        # Fetch from GitHub to get existing branches
+        print("📡 Fetching from GitHub...")
+        success, output = run_git_command(
+            ["git", "fetch", "github"],
+            timeout=300
+        )
+        
+        if not success:
+            print(f"⚠️ Could not fetch from GitHub (repo might be empty): {output}")
+        
+        # Step 5: Create migration branch
+        print("\n🌿 Step 5: Creating migration branch...")
+        
+        # Generate unique branch name with timestamp
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        migration_branch = f"migration/kubikaos_{timestamp}"
+        
+        print(f"📋 Branch name: {migration_branch}")
+        
+        # Create and checkout the migration branch
+        success, output = run_git_command(
+            ["git", "checkout", "-b", migration_branch]
+        )
+        
+        if not success:
+            print(f"❌ Failed to create migration branch: {output}")
+            return False
+        
+        print(f"✅ Created migration branch: {migration_branch}")
+        
+        # Step 6: Push to GitHub
+        print("\n📤 Step 6: Pushing to GitHub...")
+        
+        # Push the migration branch to GitHub
+        success, output = run_git_command(
+            ["git", "push", "github", migration_branch],
+            timeout=600  # 10 minutes for large pushes
+        )
+        
+        if not success:
+            print(f"❌ Failed to push to GitHub: {output}")
+            return False
+        
+        print(f"✅ Successfully pushed to GitHub!")
+        
+        # Step 7: Push all other branches and tags
+        print("\n🏷️ Step 7: Pushing all branches and tags...")
+        
+        # Get all remote branches from the mirror clone
+        success, branches_output = run_git_command(
+            ["git", "branch", "-r"]
+        )
+        
+        if success and branches_output:
+            branches = []
+            for line in branches_output.strip().split('\n'):
+                line = line.strip()
+                if line and not line.startswith('origin/HEAD'):
+                    branch_name = line.replace('origin/', '')
+                    branches.append(branch_name)
             
-    except subprocess.TimeoutExpired:
-        print("❌ Clone operation timed out (5 minutes)")
-        return False
+            print(f"📋 Found {len(branches)} branches to migrate")
+            
+            # Push each branch
+            for branch in branches:
+                if branch != migration_branch:  # Don't push migration branch again
+                    print(f"   📤 Pushing branch: {branch}")
+                    success, output = run_git_command(
+                        ["git", "push", "github", f"origin/{branch}:refs/heads/{branch}"]
+                    )
+                    
+                    if success:
+                        print(f"   ✅ Pushed: {branch}")
+                    else:
+                        print(f"   ⚠️ Failed to push {branch}: {output}")
+        
+        # Push all tags
+        print("🏷️ Pushing tags...")
+        success, output = run_git_command(
+            ["git", "push", "github", "--tags"]
+        )
+        
+        if success:
+            print("✅ Tags pushed successfully")
+        else:
+            print(f"⚠️ Failed to push tags: {output}")
+        
+        # Step 8: Summary
+        print("\n" + "=" * 50)
+        print("🎉 MIGRATION COMPLETED SUCCESSFULLY!")
+        print("=" * 50)
+        print(f"📋 Migration Summary:")
+        print(f"  - Source: kubika2/kubikaos (Bitbucket)")
+        print(f"  - Target: kubiyabot/audi-qa (GitHub)")
+        print(f"  - Primary branch: {migration_branch}")
+        print(f"  - Repository URL: {GITHUB_REPO}")
+        print(f"  - View at: https://github.com/kubiyabot/audi-qa/tree/{migration_branch}")
+        print("=" * 50)
+        
+        return True
+        
     except Exception as e:
-        print(f"❌ Clone failed with error: {e}")
+        print(f"❌ Migration failed with error: {e}")
         return False
+        
+    finally:
+        # Cleanup
+        try:
+            os.chdir("/tmp")
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                print(f"🧹 Cleaned up temporary directory: {temp_dir}")
+        except Exception as e:
+            print(f"⚠️ Could not clean up temporary directory: {e}")
 
 def main():
-    """Main function for command-line usage"""
-    if len(sys.argv) < 3:
-        print("Usage: clone_repo.py <project_key> <repo_slug> [--destination=<path>] [--branch=<branch>]")
-        print("Example: clone_repo.py kubika2 kubikaos --destination=/tmp/kubikaos --branch=main")
-        sys.exit(1)
+    """Main function for the migration tool"""
+    print("🚀 Audi Bitbucket to GitHub Migration Tool")
+    print("=" * 50)
     
-    project_key = sys.argv[1]
-    repo_slug = sys.argv[2]
-    
-    # Parse optional arguments
-    destination = None
-    branch = None
-    
-    for arg in sys.argv[3:]:
-        if arg.startswith("--destination="):
-            destination = arg.split("=", 1)[1]
-            if destination == "<no value>":
-                destination = None
-        elif arg.startswith("--branch="):
-            branch = arg.split("=", 1)[1]
-            if branch == "<no value>":
-                branch = None
-    
-    print("🚀 Bitbucket Repository Cloning Tool")
-    print("=" * 40)
-    print(f"Project: {project_key}")
-    print(f"Repository: {repo_slug}")
-    if destination:
-        print(f"Destination: {destination}")
-    if branch:
-        print(f"Branch: {branch}")
-    print("=" * 40)
-    
-    success = clone_repository(project_key, repo_slug, destination, branch)
+    success = migrate_bitbucket_to_github()
     
     if success:
-        print("\n🎉 Clone completed successfully!")
+        print("\n✅ Migration completed successfully!")
         sys.exit(0)
     else:
-        print("\n❌ Clone failed!")
+        print("\n❌ Migration failed!")
         sys.exit(1)
 
 if __name__ == "__main__":

@@ -17,7 +17,7 @@ pip install kubiya-sdk > /dev/null
             content=content,
             args=args,
             env=["BITBUCKET_SERVER_URL", "KUBIYA_USER_EMAIL"],
-            secrets=["JIRA_CLIENT_CERT", "JIRA_CLIENT_KEY", "JIRA_USER_CREDS"],
+            secrets=["JIRA_CLIENT_CERT", "JIRA_CLIENT_KEY", "JIRA_USER_CREDS", "GH_KUBIYA_TOKEN"],
             with_files=with_files if with_files else [],
             mermaid=mermaid_diagram,
             icon_url="https://logos-world.net/wp-content/uploads/2021/02/Jira-Emblem.png",
