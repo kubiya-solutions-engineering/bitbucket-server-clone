@@ -2,6 +2,10 @@
 # This module provides functions to interact with Bitbucket Server using client certificate authentication
 # Reuses the same JIRA_CLIENT_CERT and JIRA_CLIENT_KEY environment variables for certificate authentication
 
+# NOTE: For this customer setup (Audi), REST API access is restricted. 
+# Use Git HTTPS transport for repository operations instead.
+# Only basic connection testing works via REST API.
+
 import os
 import logging
 import requests
@@ -105,165 +109,6 @@ def setup_client_cert_files():
         logger.error(f"Error setting up certificate files: {str(e)}")
         raise
 
-def get_bitbucket_user() -> dict:
-    """Get the authenticated user information from Bitbucket"""
-    server_url = get_bitbucket_server_url()
-    user_url = f"{server_url}/rest/api/1.0/users?filter={{0}}"  # Get current user - will need to be adjusted based on auth
-    cert_path, key_path = setup_client_cert_files()
-
-    try:
-        response = requests.get(
-            f"{server_url}/rest/api/1.0/users",
-            cert=(cert_path, key_path),
-            headers=get_bitbucket_headers(),
-            verify=False,  # Likely self-signed cert for internal server
-            params={"limit": 1}  # Just get one user to test
-        )
-        response.raise_for_status()
-        
-        user_data = response.json()
-        logger.info(f"Successfully retrieved user data")
-        return user_data
-            
-    except HTTPError as e:
-        logger.error(f"Failed to get user data: {e}")
-        raise RuntimeError(f"Failed to get user data: {e}")
-
-def list_bitbucket_projects() -> list:
-    """List all projects from Bitbucket"""
-    server_url = get_bitbucket_server_url()
-    cert_path, key_path = setup_client_cert_files()
-    projects_url = f"{server_url}/rest/api/1.0/projects"
-
-    try:
-        response = requests.get(
-            projects_url,
-            cert=(cert_path, key_path),
-            headers=get_bitbucket_headers(),
-            verify=False
-        )
-        response.raise_for_status()
-        
-        projects_data = response.json()
-        projects = projects_data.get('values', [])
-        logger.info(f"Successfully retrieved {len(projects)} projects")
-        return projects
-            
-    except HTTPError as e:
-        logger.error(f"Failed to list projects: {e}")
-        raise RuntimeError(f"Failed to list projects: {e}")
-
-def list_bitbucket_repos(project_key: str = None) -> list:
-    """
-    List repositories from Bitbucket.
-    If project_key is provided, lists repos for that project.
-    If not provided, lists all repos across all projects.
-    """
-    server_url = get_bitbucket_server_url()
-    cert_path, key_path = setup_client_cert_files()
-    
-    if project_key:
-        repos_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos"
-        logger.info(f"Listing repositories for project: {project_key}")
-    else:
-        repos_url = f"{server_url}/rest/api/1.0/repos"
-        logger.info("Listing all repositories")
-
-    try:
-        response = requests.get(
-            repos_url,
-            cert=(cert_path, key_path),
-            headers=get_bitbucket_headers(),
-            verify=False
-        )
-        response.raise_for_status()
-        
-        repos_data = response.json()
-        repos = repos_data.get('values', [])
-        logger.info(f"Successfully retrieved {len(repos)} repositories")
-        return repos
-            
-    except HTTPError as e:
-        logger.error(f"Failed to list repositories: {e}")
-        raise RuntimeError(f"Failed to list repositories: {e}")
-
-def get_bitbucket_repo(project_key: str, repo_slug: str) -> dict:
-    """Get information about a specific Bitbucket repository"""
-    server_url = get_bitbucket_server_url()
-    repo_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}"
-    cert_path, key_path = setup_client_cert_files()
-
-    try:
-        response = requests.get(
-            repo_url,
-            cert=(cert_path, key_path),
-            headers=get_bitbucket_headers(),
-            verify=False
-        )
-        response.raise_for_status()
-        
-        repo_data = response.json()
-        logger.info(f"Successfully retrieved repository data for: {project_key}/{repo_slug}")
-        return repo_data
-            
-    except HTTPError as e:
-        logger.error(f"Failed to get repository data: {e}")
-        raise RuntimeError(f"Failed to get repository data: {e}")
-
-def get_bitbucket_branches(project_key: str, repo_slug: str) -> list:
-    """Get branches for a specific Bitbucket repository"""
-    server_url = get_bitbucket_server_url()
-    branches_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}/branches"
-    cert_path, key_path = setup_client_cert_files()
-
-    try:
-        response = requests.get(
-            branches_url,
-            cert=(cert_path, key_path),
-            headers=get_bitbucket_headers(),
-            verify=False
-        )
-        response.raise_for_status()
-        
-        branches_data = response.json()
-        branches = branches_data.get('values', [])
-        logger.info(f"Successfully retrieved {len(branches)} branches for: {project_key}/{repo_slug}")
-        return branches
-            
-    except HTTPError as e:
-        logger.error(f"Failed to get branches: {e}")
-        raise RuntimeError(f"Failed to get branches: {e}")
-
-def get_bitbucket_commits(project_key: str, repo_slug: str, branch: str = "master", limit: int = 25) -> list:
-    """Get commits for a specific Bitbucket repository branch"""
-    server_url = get_bitbucket_server_url()
-    commits_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}/commits"
-    cert_path, key_path = setup_client_cert_files()
-
-    params = {
-        "until": branch,
-        "limit": limit
-    }
-
-    try:
-        response = requests.get(
-            commits_url,
-            cert=(cert_path, key_path),
-            headers=get_bitbucket_headers(),
-            params=params,
-            verify=False
-        )
-        response.raise_for_status()
-        
-        commits_data = response.json()
-        commits = commits_data.get('values', [])
-        logger.info(f"Successfully retrieved {len(commits)} commits for: {project_key}/{repo_slug} ({branch})")
-        return commits
-            
-    except HTTPError as e:
-        logger.error(f"Failed to get commits: {e}")
-        raise RuntimeError(f"Failed to get commits: {e}")
-
 def test_bitbucket_connection():
     """Test the Bitbucket connection with current client certificate"""
     try:
@@ -326,16 +171,187 @@ def test_bitbucket_connection():
         logger.error(f"Connection test failed with exception: {str(e)}")
         return False
 
-# Example usage functions
+# ============================================================================
+# REST API FUNCTIONS (RESTRICTED FOR THIS CUSTOMER)
+# ============================================================================
+# The following functions use REST API endpoints that are restricted for this
+# customer setup. They are kept for compatibility but will likely return 401 errors.
+# Use Git HTTPS transport operations instead for actual repository work.
+
+def get_bitbucket_user() -> dict:
+    """Get the authenticated user information from Bitbucket 
+    WARNING: REST API access is restricted for this customer"""
+    server_url = get_bitbucket_server_url()
+    user_url = f"{server_url}/rest/api/1.0/users?filter={{0}}"  # Get current user - will need to be adjusted based on auth
+    cert_path, key_path = setup_client_cert_files()
+
+    try:
+        response = requests.get(
+            f"{server_url}/rest/api/1.0/users",
+            cert=(cert_path, key_path),
+            headers=get_bitbucket_headers(),
+            verify=False,  # Likely self-signed cert for internal server
+            params={"limit": 1}  # Just get one user to test
+        )
+        response.raise_for_status()
+        
+        user_data = response.json()
+        logger.info(f"Successfully retrieved user data")
+        return user_data
+            
+    except HTTPError as e:
+        logger.error(f"Failed to get user data: {e}")
+        raise RuntimeError(f"Failed to get user data: {e}")
+
+def list_bitbucket_projects() -> list:
+    """List all projects from Bitbucket
+    WARNING: REST API access is restricted for this customer"""
+    server_url = get_bitbucket_server_url()
+    cert_path, key_path = setup_client_cert_files()
+    projects_url = f"{server_url}/rest/api/1.0/projects"
+
+    try:
+        response = requests.get(
+            projects_url,
+            cert=(cert_path, key_path),
+            headers=get_bitbucket_headers(),
+            verify=False
+        )
+        response.raise_for_status()
+        
+        projects_data = response.json()
+        projects = projects_data.get('values', [])
+        logger.info(f"Successfully retrieved {len(projects)} projects")
+        return projects
+            
+    except HTTPError as e:
+        logger.error(f"Failed to list projects: {e}")
+        raise RuntimeError(f"Failed to list projects: {e}")
+
+def list_bitbucket_repos(project_key: str = None) -> list:
+    """List repositories from Bitbucket
+    WARNING: REST API access is restricted for this customer"""
+    server_url = get_bitbucket_server_url()
+    cert_path, key_path = setup_client_cert_files()
+    
+    if project_key:
+        repos_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos"
+        logger.info(f"Listing repositories for project: {project_key}")
+    else:
+        repos_url = f"{server_url}/rest/api/1.0/repos"
+        logger.info("Listing all repositories")
+
+    try:
+        response = requests.get(
+            repos_url,
+            cert=(cert_path, key_path),
+            headers=get_bitbucket_headers(),
+            verify=False
+        )
+        response.raise_for_status()
+        
+        repos_data = response.json()
+        repos = repos_data.get('values', [])
+        logger.info(f"Successfully retrieved {len(repos)} repositories")
+        return repos
+            
+    except HTTPError as e:
+        logger.error(f"Failed to list repositories: {e}")
+        raise RuntimeError(f"Failed to list repositories: {e}")
+
+def get_bitbucket_repo(project_key: str, repo_slug: str) -> dict:
+    """Get information about a specific Bitbucket repository
+    WARNING: REST API access is restricted for this customer"""
+    server_url = get_bitbucket_server_url()
+    repo_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}"
+    cert_path, key_path = setup_client_cert_files()
+
+    try:
+        response = requests.get(
+            repo_url,
+            cert=(cert_path, key_path),
+            headers=get_bitbucket_headers(),
+            verify=False
+        )
+        response.raise_for_status()
+        
+        repo_data = response.json()
+        logger.info(f"Successfully retrieved repository data for: {project_key}/{repo_slug}")
+        return repo_data
+            
+    except HTTPError as e:
+        logger.error(f"Failed to get repository data: {e}")
+        raise RuntimeError(f"Failed to get repository data: {e}")
+
+def get_bitbucket_branches(project_key: str, repo_slug: str) -> list:
+    """Get branches for a specific Bitbucket repository
+    WARNING: REST API access is restricted for this customer"""
+    server_url = get_bitbucket_server_url()
+    branches_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}/branches"
+    cert_path, key_path = setup_client_cert_files()
+
+    try:
+        response = requests.get(
+            branches_url,
+            cert=(cert_path, key_path),
+            headers=get_bitbucket_headers(),
+            verify=False
+        )
+        response.raise_for_status()
+        
+        branches_data = response.json()
+        branches = branches_data.get('values', [])
+        logger.info(f"Successfully retrieved {len(branches)} branches for: {project_key}/{repo_slug}")
+        return branches
+            
+    except HTTPError as e:
+        logger.error(f"Failed to get branches: {e}")
+        raise RuntimeError(f"Failed to get branches: {e}")
+
+def get_bitbucket_commits(project_key: str, repo_slug: str, branch: str = "master", limit: int = 25) -> list:
+    """Get commits for a specific Bitbucket repository branch
+    WARNING: REST API access is restricted for this customer"""
+    server_url = get_bitbucket_server_url()
+    commits_url = f"{server_url}/rest/api/1.0/projects/{project_key}/repos/{repo_slug}/commits"
+    cert_path, key_path = setup_client_cert_files()
+
+    params = {
+        "until": branch,
+        "limit": limit
+    }
+
+    try:
+        response = requests.get(
+            commits_url,
+            cert=(cert_path, key_path),
+            headers=get_bitbucket_headers(),
+            params=params,
+            verify=False
+        )
+        response.raise_for_status()
+        
+        commits_data = response.json()
+        commits = commits_data.get('values', [])
+        logger.info(f"Successfully retrieved {len(commits)} commits for: {project_key}/{repo_slug} ({branch})")
+        return commits
+            
+    except HTTPError as e:
+        logger.error(f"Failed to get commits: {e}")
+        raise RuntimeError(f"Failed to get commits: {e}")
+
+# ============================================================================
+# EXAMPLE USAGE (FOR REFERENCE ONLY)
+# ============================================================================
+
 def example_usage():
-    """Example of how to use the Bitbucket functions"""
+    """Example of how to use the Bitbucket functions (REST API functions likely won't work)"""
     try:
         # Test connection
         if not test_bitbucket_connection():
             logger.error("Bitbucket connection test failed")
             return
         
-        # List projects
+        # List projects (likely to fail with 401)
         projects = list_bitbucket_projects()
         print(f"Found {len(projects)} projects")
         for project in projects[:3]:  # Show first 3

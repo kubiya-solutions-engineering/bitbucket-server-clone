@@ -9,12 +9,8 @@ from typing import Optional
 # Import from our bitbucket functions (the file is still named github_funcs.py but contains bitbucket functions)
 from github_funcs import (
     get_bitbucket_server_url,
-    get_bitbucket_headers,
     setup_client_cert_files,
-    test_bitbucket_connection,
-    get_bitbucket_repo,
-    list_bitbucket_projects,
-    list_bitbucket_repos
+    test_bitbucket_connection
 )
 
 def setup_git_with_certificates() -> tuple:
@@ -77,35 +73,48 @@ def cleanup_git_config():
         print(f"⚠️ Warning: Could not clean up git config: {e}")
 
 def get_clone_url(project_key: str, repo_slug: str) -> str:
-    """Get the HTTPS clone URL for a repository"""
+    """Get the HTTPS clone URL for a repository using direct URL construction"""
+    # Use direct URL construction since REST API is restricted
+    server_url = get_bitbucket_server_url()
+    https_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
+    print(f"Clone URL: {https_url}")
+    return https_url
+
+def test_repository_access(project_key: str, repo_slug: str) -> bool:
+    """Test if repository is accessible via Git operations"""
+    print(f"Testing access to repository {project_key}/{repo_slug}...")
+    
     try:
-        repo_data = get_bitbucket_repo(project_key, repo_slug)
+        # Set up certificates
+        setup_git_with_certificates()
         
-        # Extract clone URLs from the repository data
-        clone_links = repo_data.get('links', {}).get('clone', [])
+        # Get clone URL
+        clone_url = get_clone_url(project_key, repo_slug)
         
-        # Find the HTTPS clone URL
-        https_url = None
-        for link in clone_links:
-            if link.get('name') == 'https':
-                https_url = link.get('href')
-                break
+        # Test git ls-remote (lightweight way to test access)
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", clone_url],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
         
-        if not https_url:
-            # Fallback: construct URL manually
-            server_url = get_bitbucket_server_url()
-            https_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
-        
-        print(f"Clone URL: {https_url}")
-        return https_url
-        
+        if result.returncode == 0:
+            branches = result.stdout.strip().split('\n') if result.stdout.strip() else []
+            print(f"✅ Repository accessible! Found {len(branches)} branches")
+            return True
+        else:
+            print(f"❌ Repository not accessible: {result.stderr}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        print("❌ Repository access test timed out (30s)")
+        return False
     except Exception as e:
-        print(f"⚠️ Could not get clone URL from API, using fallback: {e}")
-        # Fallback: construct URL manually
-        server_url = get_bitbucket_server_url()
-        https_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
-        print(f"Fallback clone URL: {https_url}")
-        return https_url
+        print(f"❌ Repository access test failed: {e}")
+        return False
+    finally:
+        cleanup_git_config()
 
 def clone_repository(project_key: str, repo_slug: str, destination: str = None, branch: str = None) -> bool:
     """
@@ -130,10 +139,12 @@ def clone_repository(project_key: str, repo_slug: str, destination: str = None, 
     key_path = None
     
     try:
-        # Verify the repository exists
-        print(f"Checking if repository {project_key}/{repo_slug} exists...")
-        repo_data = get_bitbucket_repo(project_key, repo_slug)
-        print(f"✅ Repository found: {repo_data.get('name', repo_slug)}")
+        # Test repository access via Git instead of REST API
+        if not test_repository_access(project_key, repo_slug):
+            print("❌ Repository is not accessible via Git operations.")
+            return False
+        
+        print(f"✅ Repository {project_key}/{repo_slug} is accessible")
         
         # Set up git with certificates
         cert_path, key_path = setup_git_with_certificates()
@@ -239,47 +250,44 @@ def clone_repository(project_key: str, repo_slug: str, destination: str = None, 
             except Exception as e:
                 print(f"⚠️ Could not remove key file: {e}")
 
-def list_available_repos(project_key: str = None):
-    """List available repositories for cloning"""
-    try:
-        if project_key:
-            print(f"Repositories in project {project_key}:")
-            repos = list_bitbucket_repos(project_key)
-            for repo in repos:
-                print(f"  - {repo['slug']} ({repo['name']})")
-        else:
-            print("Available projects:")
-            projects = list_bitbucket_projects()
-            for project in projects[:10]:  # Limit to first 10 projects
-                print(f"  - {project['key']}: {project['name']}")
-                
-                # Show a few repos from each project
-                try:
-                    repos = list_bitbucket_repos(project['key'])
-                    for repo in repos[:3]:  # Show first 3 repos
-                        print(f"    - {repo['slug']}")
-                    if len(repos) > 3:
-                        print(f"    ... and {len(repos) - 3} more")
-                except Exception as e:
-                    print(f"    (Could not list repos: {e})")
-                    
-    except Exception as e:
-        print(f"❌ Failed to list repositories: {e}")
+def list_known_repos():
+    """List known repositories that can be accessed"""
+    print("🔧 Known Bitbucket Repositories")
+    print("=" * 40)
+    
+    server_url = get_bitbucket_server_url()
+    print(f"Server: {server_url}")
+    
+    # Known repositories (can be expanded)
+    known_repos = [
+        ("kubika2", "kubikaos", "From customer URL"),
+        # Add more known repos here as discovered
+    ]
+    
+    print(f"\n📂 Known repositories:")
+    for project_key, repo_slug, description in known_repos:
+        git_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
+        print(f"- {project_key}/{repo_slug} ({description})")
+        print(f"  Git URL: {git_url}")
+    
+    print(f"\n💡 To test access to a repository, use:")
+    print(f"python clone_repo.py <project_key> <repo_slug> --list")
 
 def main():
     import argparse
 
     parser = argparse.ArgumentParser(description="Clone repository from Bitbucket Server")
-    parser.add_argument("project_key", help="Project key (e.g., EOCCJPA)")
-    parser.add_argument("repo_slug", help="Repository slug (e.g., kubikaos)")
+    parser.add_argument("project_key", nargs='?', help="Project key (e.g., kubika2)")
+    parser.add_argument("repo_slug", nargs='?', help="Repository slug (e.g., kubikaos)")
     parser.add_argument("--destination", "-d", help="Local directory to clone into (defaults to repo name)")
     parser.add_argument("--branch", "-b", help="Specific branch to clone")
-    parser.add_argument("--list", "-l", action="store_true", help="List available repositories")
+    parser.add_argument("--list", "-l", action="store_true", help="List known repositories")
+    parser.add_argument("--test", "-t", action="store_true", help="Test repository access without cloning")
     
     args = parser.parse_args()
     
     if args.list:
-        list_available_repos(args.project_key if args.project_key != "." else None)
+        list_known_repos()
         return
     
     # Validate required arguments
@@ -287,6 +295,16 @@ def main():
         print("❌ Both project_key and repo_slug are required")
         parser.print_help()
         sys.exit(1)
+    
+    if args.test:
+        print(f"Testing repository access: {args.project_key}/{args.repo_slug}")
+        success = test_repository_access(args.project_key, args.repo_slug)
+        if success:
+            print("✅ Repository access test passed")
+        else:
+            print("❌ Repository access test failed")
+            sys.exit(1)
+        return
     
     print(f"Cloning repository: {args.project_key}/{args.repo_slug}")
     if args.destination:

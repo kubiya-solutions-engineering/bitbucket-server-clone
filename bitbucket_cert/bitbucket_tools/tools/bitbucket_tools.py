@@ -29,76 +29,130 @@ clone_repo_tool = BitBucketCertTool(
 # List repositories tool
 list_repos_tool = BitBucketCertTool(
     name="list_bitbucket_repos",
-    description="List available repositories in Bitbucket Server",
-    content="""python /tmp/list_bitbucket_repos.py "{{ .project_key }}" """,
+    description="Test Git access to known Bitbucket repositories using HTTPS transport",
+    content="""python /tmp/list_bitbucket_repos.py "{{ .project_key }}" "{{ .repo_slug }}" """,
     args=[
-        Arg(name="project_key", type="str", description="Project key to list repos for (leave empty to list all projects)", required=False),
+        Arg(name="project_key", type="str", description="Project key (e.g., kubika2)", required=False),
+        Arg(name="repo_slug", type="str", description="Repository slug (e.g., kubikaos) - leave empty to test known repositories", required=False),
     ],
     with_files=[
         FileSpec(
             destination="/tmp/list_bitbucket_repos.py",
             content="""#!/usr/bin/env python3
 import sys
+import subprocess
 import os
 sys.path.append('/tmp')
 
 from github_funcs import (
-    list_bitbucket_projects,
-    list_bitbucket_repos,
+    get_bitbucket_server_url,
+    setup_client_cert_files,
     test_bitbucket_connection
 )
 
-def main():
-    project_key = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] != "<no value>" else None
+def test_git_access(project_key, repo_slug):
+    \"\"\"Test Git access to a specific repository\"\"\"
+    server_url = get_bitbucket_server_url()
+    git_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
     
-    # Test connection first
-    if not test_bitbucket_connection():
-        print("❌ Failed to establish connection to Bitbucket. Please check your configuration.")
-        sys.exit(1)
+    print(f"🔍 Testing Git access to: {project_key}/{repo_slug}")
+    print(f"Git URL: {git_url}")
     
     try:
-        if project_key:
-            print(f"Repositories in project {project_key}:")
-            repos = list_bitbucket_repos(project_key)
-            if not repos:
-                print(f"No repositories found in project {project_key}")
-                return
-                
-            for repo in repos:
-                private_str = "private" if repo.get('public', True) == False else "public"
-                print(f"  - {repo['slug']} ({repo['name']}) - {private_str}")
-                if 'links' in repo and 'clone' in repo['links']:
-                    clone_links = repo['links']['clone']
-                    for link in clone_links:
-                        if link.get('name') == 'https':
-                            print(f"    Clone URL: {link['href']}")
-                            break
+        # Set up git with certificates (similar to clone_repo.py)
+        cert_path, key_path = setup_client_cert_files()
+        
+        # Configure git to use certificates temporarily
+        temp_git_config = [
+            ["git", "config", "--global", "http.sslCert", cert_path],
+            ["git", "config", "--global", "http.sslKey", key_path], 
+            ["git", "config", "--global", f"http.{server_url}.sslVerify", "false"]
+        ]
+        
+        for cmd in temp_git_config:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        
+        # Test git ls-remote (lightweight way to test access)
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", git_url],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            branches = result.stdout.strip().split('\\n') if result.stdout.strip() else []
+            print(f"✅ Success! Found {len(branches)} branches:")
+            for branch in branches[:5]:  # Show first 5 branches
+                if branch:
+                    parts = branch.split('\\t')
+                    if len(parts) == 2:
+                        commit_hash = parts[0][:8]
+                        branch_ref = parts[1].replace('refs/heads/', '')
+                        print(f"  - {branch_ref} ({commit_hash})")
+            if len(branches) > 5:
+                print(f"  ... and {len(branches) - 5} more branches")
+            return True
         else:
-            print("Available projects and their repositories:")
-            projects = list_bitbucket_projects()
-            if not projects:
-                print("No projects found")
-                return
-                
-            for project in projects[:10]:  # Limit to first 10 projects
-                print(f"\\n📁 {project['key']}: {project['name']}")
-                
-                try:
-                    repos = list_bitbucket_repos(project['key'])
-                    if repos:
-                        for repo in repos[:5]:  # Show first 5 repos per project
-                            private_str = "private" if repo.get('public', True) == False else "public"
-                            print(f"    - {repo['slug']} ({repo['name']}) - {private_str}")
-                        if len(repos) > 5:
-                            print(f"    ... and {len(repos) - 5} more repositories")
-                    else:
-                        print("    (No repositories)")
-                except Exception as e:
-                    print(f"    (Could not list repos: {e})")
-                    
+            print(f"❌ Git access failed:")
+            print(f"Error: {result.stderr}")
+            return False
+            
+    except subprocess.TimeoutExpired:
+        print("❌ Git operation timed out (30s)")
+        return False
     except Exception as e:
-        print(f"❌ Failed to list repositories: {e}")
+        print(f"❌ Git test failed: {e}")
+        return False
+
+def main():
+    project_key = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] != "<no value>" else None
+    repo_slug = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != "<no value>" else None
+    
+    print("🔧 Bitbucket Git Access Test")
+    print("=" * 40)
+    
+    # Test basic connection first
+    if not test_bitbucket_connection():
+        print("❌ Failed to establish basic connection to Bitbucket. Please check your configuration.")
         sys.exit(1)
+    
+    print("✅ Basic connection works. Testing Git access...")
+    
+    # Known repositories to test (can be expanded)
+    test_repos = []
+    
+    if project_key and repo_slug:
+        test_repos.append((project_key, repo_slug))
+    elif project_key:
+        # Test known repos in the project
+        test_repos.append((project_key, "kubikaos"))  # Known repo
+    else:
+        # Test known repositories
+        test_repos = [
+            ("kubika2", "kubikaos"),  # From customer URL
+            # Add more known repos here as needed
+        ]
+    
+    print(f"\\nTesting {len(test_repos)} repository(ies)...")
+    
+    success_count = 0
+    for proj_key, repo_name in test_repos:
+        print("\\n" + "-" * 50)
+        if test_git_access(proj_key, repo_name):
+            success_count += 1
+    
+    print("\\n" + "=" * 50)
+    print(f"🎯 Summary: {success_count}/{len(test_repos)} repositories accessible via Git")
+    
+    if success_count > 0:
+        print("✅ Git HTTPS transport is working with your certificates!")
+        print("💡 You can proceed with Git operations (clone, migration, etc.)")
+    else:
+        print("❌ No repositories accessible. Check:")
+        print("  - Repository names and project keys")
+        print("  - Certificate permissions for Git operations")
+        print("  - Network connectivity")
 
 if __name__ == "__main__":
     main()
@@ -147,10 +201,10 @@ if __name__ == "__main__":
 # Get repository info tool
 get_repo_info_tool = BitBucketCertTool(
     name="get_bitbucket_repo_info",
-    description="Get detailed information about a specific Bitbucket repository",
+    description="Get repository information using Git HTTPS transport (branches, recent commits, etc.)",
     content="""python /tmp/get_repo_info.py "{{ .project_key }}" "{{ .repo_slug }}" """,
     args=[
-        Arg(name="project_key", type="str", description="Project key (e.g., EOCCJPA)", required=True),
+        Arg(name="project_key", type="str", description="Project key (e.g., kubika2)", required=True),
         Arg(name="repo_slug", type="str", description="Repository slug (e.g., kubikaos)", required=True),
     ],
     with_files=[
@@ -158,15 +212,155 @@ get_repo_info_tool = BitBucketCertTool(
             destination="/tmp/get_repo_info.py",
             content="""#!/usr/bin/env python3
 import sys
-import json
+import subprocess
+import tempfile
+import os
+import shutil
 sys.path.append('/tmp')
 
 from github_funcs import (
-    get_bitbucket_repo,
-    get_bitbucket_branches,
-    get_bitbucket_commits,
+    get_bitbucket_server_url,
+    setup_client_cert_files,
     test_bitbucket_connection
 )
+
+def setup_git_with_certificates():
+    \"\"\"Set up git configuration to use client certificates\"\"\"
+    cert_path, key_path = setup_client_cert_files()
+    server_url = get_bitbucket_server_url()
+    
+    # Configure git to use the certificates
+    git_config_commands = [
+        ["git", "config", "--global", "http.sslCert", cert_path],
+        ["git", "config", "--global", "http.sslKey", key_path],
+        ["git", "config", "--global", f"http.{server_url}.sslVerify", "false"]
+    ]
+    
+    for cmd in git_config_commands:
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+    
+    return cert_path, key_path
+
+def get_git_repo_info(project_key, repo_slug):
+    \"\"\"Get repository information using Git operations\"\"\"
+    server_url = get_bitbucket_server_url()
+    git_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
+    
+    print(f"Repository Information: {project_key}/{repo_slug}")
+    print("=" * 50)
+    print(f"Git URL: {git_url}")
+    
+    try:
+        # Set up certificates
+        setup_git_with_certificates()
+        
+        # Get remote branches
+        print("\\n🌿 Getting branches...")
+        result = subprocess.run(
+            ["git", "ls-remote", "--heads", git_url],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            branches = [line.split('\\t')[1].replace('refs/heads/', '') 
+                       for line in result.stdout.strip().split('\\n') if line]
+            print(f"✅ Found {len(branches)} branches:")
+            for branch in branches[:10]:  # Show first 10 branches
+                print(f"  - {branch}")
+            if len(branches) > 10:
+                print(f"  ... and {len(branches) - 10} more branches")
+        else:
+            print(f"❌ Failed to get branches: {result.stderr}")
+            return False
+        
+        # Get tags
+        print("\\n🏷️  Getting tags...")
+        result = subprocess.run(
+            ["git", "ls-remote", "--tags", git_url],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        if result.returncode == 0:
+            tags = [line.split('\\t')[1].replace('refs/tags/', '') 
+                   for line in result.stdout.strip().split('\\n') 
+                   if line and not line.endswith('^{}')]
+            if tags:
+                print(f"✅ Found {len(tags)} tags:")
+                for tag in tags[-5:]:  # Show last 5 tags
+                    print(f"  - {tag}")
+                if len(tags) > 5:
+                    print(f"  ... and {len(tags) - 5} more tags")
+            else:
+                print("No tags found")
+        else:
+            print(f"⚠️ Could not get tags: {result.stderr}")
+        
+        # Get default branch info by doing a shallow clone
+        print("\\n📊 Getting recent commits (shallow clone)...")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            clone_dir = os.path.join(temp_dir, "repo")
+            
+            # Shallow clone to get recent commits
+            result = subprocess.run(
+                ["git", "clone", "--depth=5", git_url, clone_dir],
+                capture_output=True,
+                text=True,
+                timeout=60
+            )
+            
+            if result.returncode == 0:
+                # Get recent commits
+                result = subprocess.run(
+                    ["git", "log", "--oneline", "-5"],
+                    capture_output=True,
+                    text=True,
+                    cwd=clone_dir
+                )
+                
+                if result.returncode == 0:
+                    commits = result.stdout.strip().split('\\n')
+                    print(f"✅ Recent commits:")
+                    for commit in commits:
+                        if commit:
+                            print(f"  {commit}")
+                
+                # Get current branch
+                result = subprocess.run(
+                    ["git", "branch", "--show-current"],
+                    capture_output=True,
+                    text=True,
+                    cwd=clone_dir
+                )
+                
+                if result.returncode == 0:
+                    current_branch = result.stdout.strip()
+                    print(f"\\n🎯 Default branch: {current_branch}")
+                
+                # Get repository size (approximate)
+                try:
+                    total_size = sum(os.path.getsize(os.path.join(dirpath, filename))
+                                   for dirpath, dirnames, filenames in os.walk(clone_dir)
+                                   for filename in filenames)
+                    size_mb = total_size / (1024 * 1024)
+                    print(f"📦 Repository size (approx): {size_mb:.2f} MB")
+                except:
+                    pass
+                    
+            else:
+                print(f"⚠️ Could not clone for detailed info: {result.stderr}")
+        
+        return True
+        
+    except subprocess.TimeoutExpired:
+        print("❌ Git operation timed out")
+        return False
+    except Exception as e:
+        print(f"❌ Failed to get repository info: {e}")
+        return False
 
 def main():
     if len(sys.argv) < 3:
@@ -181,48 +375,12 @@ def main():
         print("❌ Failed to establish connection to Bitbucket. Please check your configuration.")
         sys.exit(1)
     
+    print("✅ Basic connection works. Getting repository info via Git...")
+    
     try:
-        # Get repository info
-        print(f"Repository Information: {project_key}/{repo_slug}")
-        print("=" * 50)
-        
-        repo_data = get_bitbucket_repo(project_key, repo_slug)
-        
-        print(f"Name: {repo_data.get('name', 'N/A')}")
-        print(f"Description: {repo_data.get('description', 'No description')}")
-        print(f"Public: {'Yes' if repo_data.get('public', False) else 'No'}")
-        print(f"Fork: {'Yes' if repo_data.get('forkable', False) else 'No'}")
-        print(f"SCM: {repo_data.get('scmId', 'N/A')}")
-        
-        # Show clone URLs
-        if 'links' in repo_data and 'clone' in repo_data['links']:
-            print("\\nClone URLs:")
-            for link in repo_data['links']['clone']:
-                print(f"  {link['name']}: {link['href']}")
-        
-        # Get branches
-        try:
-            print("\\nBranches:")
-            branches = get_bitbucket_branches(project_key, repo_slug)
-            for branch in branches[:10]:  # Show first 10 branches
-                default_marker = " (default)" if branch.get('isDefault', False) else ""
-                print(f"  - {branch['displayId']}{default_marker}")
-            if len(branches) > 10:
-                print(f"  ... and {len(branches) - 10} more branches")
-        except Exception as e:
-            print(f"  Could not retrieve branches: {e}")
-        
-        # Get recent commits from default branch
-        try:
-            print("\\nRecent Commits:")
-            commits = get_bitbucket_commits(project_key, repo_slug, "master", 5)
-            for commit in commits:
-                author = commit.get('author', {}).get('name', 'Unknown')
-                message = commit.get('message', 'No message').split('\\n')[0][:60]
-                commit_id = commit.get('id', '')[:8]
-                print(f"  {commit_id} - {message} ({author})")
-        except Exception as e:
-            print(f"  Could not retrieve commits: {e}")
+        success = get_git_repo_info(project_key, repo_slug)
+        if not success:
+            sys.exit(1)
             
     except Exception as e:
         print(f"❌ Failed to get repository information: {e}")
@@ -241,7 +399,7 @@ if __name__ == "__main__":
 # List projects tool
 list_projects_tool = BitBucketCertTool(
     name="list_bitbucket_projects",
-    description="List all accessible Bitbucket projects",
+    description="Show guidance for working with Bitbucket repositories using Git HTTPS transport",
     content="python /tmp/list_bitbucket_projects.py",
     args=[],
     with_files=[
@@ -251,33 +409,46 @@ list_projects_tool = BitBucketCertTool(
 import sys
 sys.path.append('/tmp')
 
-from github_funcs import list_bitbucket_projects, test_bitbucket_connection
+from github_funcs import test_bitbucket_connection, get_bitbucket_server_url
 
 def main():
+    print("🔧 Bitbucket Git Access Guide")
+    print("=" * 40)
+    
     # Test connection first
     if not test_bitbucket_connection():
-        print("❌ Failed to establish connection to Bitbucket. Please check your configuration.")
+        print("❌ Failed to establish basic connection to Bitbucket. Please check your configuration.")
         sys.exit(1)
     
-    try:
-        print("Available Bitbucket Projects:")
-        print("=" * 40)
-        
-        projects = list_bitbucket_projects()
-        if not projects:
-            print("No projects found")
-            return
-            
-        for project in projects:
-            print(f"📁 {project['key']}: {project['name']}")
-            if 'description' in project and project['description']:
-                print(f"   Description: {project['description']}")
-            print(f"   Public: {'Yes' if project.get('public', False) else 'No'}")
-            print()
-            
-    except Exception as e:
-        print(f"❌ Failed to list projects: {e}")
-        sys.exit(1)
+    server_url = get_bitbucket_server_url()
+    
+    print("✅ Basic connection works!")
+    print("\\n📋 Git HTTPS Transport Information:")
+    print(f"Server URL: {server_url}")
+    print("\\n🎯 For this customer setup:")
+    print("- REST API listing is restricted (this is normal for enterprise setups)")
+    print("- Git HTTPS operations work with client certificates")
+    print("- Use direct Git URLs for operations")
+    
+    print("\\n🌐 Git URL Format:")
+    print(f"{server_url}/scm/{{project_key}}/{{repo_slug}}.git")
+    
+    print("\\n📂 Known Repositories:")
+    print("- kubika2/kubikaos")
+    print("  Git URL: https://api.cip.audi.de/bitbucket/scm/kubika2/kubikaos.git")
+    
+    print("\\n🛠️  Available Operations:")
+    print("1. Test Git access: Use 'list_bitbucket_repos' tool")
+    print("2. Get repo info: Use 'get_bitbucket_repo_info' tool")
+    print("3. Clone repository: Use 'clone_repo' tool")
+    print("4. Migrate to GitHub: Use 'migrate_bitbucket_to_github' tool")
+    
+    print("\\n💡 Tips:")
+    print("- All operations use Git HTTPS transport with client certificates")
+    print("- No REST API access needed for Git operations")
+    print("- Migration tool works directly with Git operations")
+    
+    print("\\n✅ Ready to proceed with Git-based operations!")
 
 if __name__ == "__main__":
     main()
@@ -292,7 +463,7 @@ if __name__ == "__main__":
 # Debug API permissions tool
 debug_api_tool = BitBucketCertTool(
     name="debug_bitbucket_api",
-    description="Debug Bitbucket API endpoints to check permissions and access",
+    description="Debug Git HTTPS transport and certificate configuration for Bitbucket",
     content="python /tmp/debug_bitbucket_api.py",
     args=[],
     with_files=[
@@ -300,8 +471,8 @@ debug_api_tool = BitBucketCertTool(
             destination="/tmp/debug_bitbucket_api.py",
             content="""#!/usr/bin/env python3
 import sys
-import requests
-import json
+import subprocess
+import os
 sys.path.append('/tmp')
 
 from github_funcs import (
@@ -311,98 +482,184 @@ from github_funcs import (
     test_bitbucket_connection
 )
 
-def test_endpoint(endpoint_path, description):
-    \"\"\"Test a specific API endpoint\"\"\"
-    server_url = get_bitbucket_server_url()
-    cert_path, key_path = setup_client_cert_files()
-    full_url = f"{server_url}{endpoint_path}"
+def test_git_connectivity():
+    \"\"\"Test Git connectivity and certificate setup\"\"\"
+    print("\\n🔧 Testing Git Configuration and Connectivity")
+    print("-" * 50)
     
-    print(f"\\n🔍 Testing {description}")
-    print(f"URL: {full_url}")
+    server_url = get_bitbucket_server_url()
     
     try:
-        response = requests.get(
-            full_url,
-            cert=(cert_path, key_path),
-            headers=get_bitbucket_headers(),
-            verify=False
-        )
+        # Set up certificates
+        cert_path, key_path = setup_client_cert_files()
         
-        print(f"Status: {response.status_code}")
+        print(f"✅ Certificate files created:")
+        print(f"  - Cert: {cert_path} ({os.path.getsize(cert_path)} bytes)")
+        print(f"  - Key: {key_path} ({os.path.getsize(key_path)} bytes)")
         
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                if isinstance(data, dict):
-                    if 'values' in data:
-                        print(f"✅ Success - Found {len(data['values'])} items")
-                        # Show first few items
-                        for i, item in enumerate(data['values'][:3]):
-                            if isinstance(item, dict):
-                                key = item.get('key', item.get('slug', item.get('name', f'Item {i+1}')))
-                                name = item.get('name', '')
-                                print(f"  - {key}: {name}")
-                    else:
-                        print(f"✅ Success - Response keys: {list(data.keys())}")
-                elif isinstance(data, list):
-                    print(f"✅ Success - Found {len(data)} items")
-                else:
-                    print(f"✅ Success - Response type: {type(data)}")
-            except:
-                print(f"✅ Success - Response length: {len(response.text)} chars")
-        elif response.status_code == 401:
-            print("❌ 401 Unauthorized - Certificate may not have permission for this endpoint")
-        elif response.status_code == 403:
-            print("❌ 403 Forbidden - Access denied")
-        elif response.status_code == 404:
-            print("❌ 404 Not Found - Endpoint doesn't exist")
-        else:
-            print(f"❌ {response.status_code} - {response.reason}")
-            
-        # Show error details if available
-        if response.status_code >= 400:
-            try:
-                error_data = response.json()
-                if 'errors' in error_data:
-                    for error in error_data['errors']:
-                        print(f"  Error: {error.get('message', error)}")
-            except:
-                pass
-                
+        # Configure git
+        print("\\n🔧 Configuring Git with certificates...")
+        git_config_commands = [
+            ["git", "config", "--global", "http.sslCert", cert_path],
+            ["git", "config", "--global", "http.sslKey", key_path], 
+            ["git", "config", "--global", f"http.{server_url}.sslVerify", "false"]
+        ]
+        
+        for cmd in git_config_commands:
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f"  ✅ {' '.join(cmd[2:])}")
+            else:
+                print(f"  ❌ Failed: {' '.join(cmd[2:])}")
+                print(f"     Error: {result.stderr}")
+        
+        return True
+        
     except Exception as e:
-        print(f"❌ Request failed: {e}")
+        print(f"❌ Git setup failed: {e}")
+        return False
 
-def main():
-    print("🔧 Bitbucket API Permissions Debug Tool")
-    print("=" * 50)
+def test_git_operations():
+    \"\"\"Test various Git operations\"\"\"
+    print("\\n🌐 Testing Git Operations")
+    print("-" * 50)
     
-    # Test connection first
-    if not test_bitbucket_connection():
-        print("❌ Failed to establish connection to Bitbucket. Please check your configuration.")
-        sys.exit(1)
+    server_url = get_bitbucket_server_url()
     
-    print("\\n✅ Basic connection works. Testing specific endpoints...")
-    
-    # Test various endpoints to understand permissions
-    endpoints_to_test = [
-        ("/rest/api/1.0/projects", "List all projects"),
-        ("/rest/api/1.0/repos", "List all repositories"),
-        ("/rest/api/1.0/projects/kubika2", "Get kubika2 project details"),
-        ("/rest/api/1.0/projects/kubika2/repos", "List repos in kubika2 project"),
-        ("/rest/api/1.0/projects/kubika2/repos/kubikaos", "Get kubikaos repository details"),
-        ("/rest/api/1.0/projects/kubika2/repos/kubikaos/branches", "Get kubikaos branches"),
-        ("/rest/api/1.0/users", "List users (limited test)"),
-        ("/rest/api/1.0/admin/users", "Admin users endpoint (may be restricted)"),
+    # Known repositories to test
+    test_repos = [
+        ("kubika2", "kubikaos", "From customer URL"),
     ]
     
-    for endpoint, description in endpoints_to_test:
-        test_endpoint(endpoint, description)
+    success_count = 0
     
+    for project_key, repo_slug, description in test_repos:
+        git_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
+        print(f"\\n🔍 Testing: {project_key}/{repo_slug} ({description})")
+        print(f"   URL: {git_url}")
+        
+        try:
+            # Test git ls-remote
+            print("   Testing git ls-remote...")
+            result = subprocess.run(
+                ["git", "ls-remote", "--heads", git_url],
+                capture_output=True,
+                text=True,
+                timeout=30
+            )
+            
+            if result.returncode == 0:
+                branches = result.stdout.strip().split('\\n') if result.stdout.strip() else []
+                print(f"   ✅ Success! Found {len(branches)} branches")
+                if branches:
+                    # Show first few branches
+                    for branch in branches[:3]:
+                        if branch:
+                            branch_name = branch.split('\\t')[1].replace('refs/heads/', '')
+                            commit_hash = branch.split('\\t')[0][:8]
+                            print(f"      - {branch_name} ({commit_hash})")
+                    if len(branches) > 3:
+                        print(f"      ... and {len(branches) - 3} more")
+                success_count += 1
+            else:
+                print(f"   ❌ Failed: {result.stderr.strip()}")
+                if "authentication" in result.stderr.lower():
+                    print("   💡 Suggestion: Check certificate permissions")
+                elif "timeout" in result.stderr.lower():
+                    print("   💡 Suggestion: Check network connectivity")
+                elif "not found" in result.stderr.lower():
+                    print("   💡 Suggestion: Verify repository path")
+                    
+        except subprocess.TimeoutExpired:
+            print("   ❌ Timeout (30s)")
+        except Exception as e:
+            print(f"   ❌ Error: {e}")
+    
+    print(f"\\n🎯 Git Operations Summary: {success_count}/{len(test_repos)} repositories accessible")
+    return success_count > 0
+
+def test_basic_git_commands():
+    \"\"\"Test basic Git functionality\"\"\"
+    print("\\n⚙️  Testing Basic Git Commands")
+    print("-" * 50)
+    
+    # Test git version
+    try:
+        result = subprocess.run(["git", "--version"], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"✅ Git version: {result.stdout.strip()}")
+        else:
+            print("❌ Git not found or not working")
+            return False
+    except:
+        print("❌ Git command failed")
+        return False
+    
+    # Test git config
+    try:
+        configs_to_check = [
+            "http.sslCert",
+            "http.sslKey", 
+            f"http.{get_bitbucket_server_url()}.sslVerify"
+        ]
+        
+        print("\\n🔧 Current Git configuration:")
+        for config in configs_to_check:
+            result = subprocess.run(
+                ["git", "config", "--global", config],
+                capture_output=True,
+                text=True
+            )
+            if result.returncode == 0:
+                value = result.stdout.strip()
+                print(f"  ✅ {config}: {value}")
+            else:
+                print(f"  ⚠️  {config}: Not set")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Git config check failed: {e}")
+        return False
+
+def main():
+    print("🔧 Bitbucket Git Transport Debug Tool")
+    print("=" * 50)
+    
+    # Test basic connection first
+    if not test_bitbucket_connection():
+        print("❌ Failed to establish basic connection to Bitbucket. Please check your configuration.")
+        sys.exit(1)
+    
+    print("✅ Basic Bitbucket connection works!")
+    
+    # Test Git basics
+    if not test_basic_git_commands():
+        print("\\n❌ Basic Git commands failed. Please check Git installation.")
+        sys.exit(1)
+    
+    # Test Git connectivity setup
+    if not test_git_connectivity():
+        print("\\n❌ Git connectivity setup failed.")
+        sys.exit(1)
+    
+    # Test actual Git operations
+    git_success = test_git_operations()
+    
+    # Summary
     print("\\n" + "=" * 50)
     print("🎯 Summary:")
-    print("- If kubika2/kubikaos endpoints work, we can proceed with migration")
-    print("- If general listing endpoints fail, it's likely a permissions issue")
-    print("- The migration should still work if the specific repo endpoints work")
+    print("✅ Basic connection: Working")
+    print("✅ Git setup: Working") 
+    if git_success:
+        print("✅ Git operations: Working")
+        print("\\n💚 Ready for Git operations (clone, migration, etc.)!")
+    else:
+        print("❌ Git operations: Failed")
+        print("\\n🔍 Next steps:")
+        print("- Verify repository names and paths")
+        print("- Check certificate permissions for Git operations")
+        print("- Contact customer for additional access if needed")
 
 if __name__ == "__main__":
     main()
