@@ -482,6 +482,56 @@ from github_funcs import (
     test_bitbucket_connection
 )
 
+def ensure_git_installed():
+    \"\"\"Ensure Git is installed in the environment\"\"\"
+    try:
+        # Check if git is already available
+        result = subprocess.run(["git", "--version"], capture_output=True, text=True)
+        if result.returncode == 0:
+            print(f"✅ Git is available: {result.stdout.strip()}")
+            return True
+    except FileNotFoundError:
+        pass
+    
+    print("🔧 Git not found. Installing Git...")
+    
+    try:
+        # Try different package managers
+        install_commands = [
+            ["apt-get", "update", "&&", "apt-get", "install", "-y", "git"],
+            ["yum", "install", "-y", "git"],
+            ["apk", "add", "git"],
+        ]
+        
+        for cmd in install_commands:
+            try:
+                if cmd[0] == "apt-get":
+                    # For apt-get, run update first, then install
+                    subprocess.run(["apt-get", "update"], check=True, capture_output=True)
+                    result = subprocess.run(["apt-get", "install", "-y", "git"], check=True, capture_output=True)
+                else:
+                    result = subprocess.run(cmd, check=True, capture_output=True)
+                
+                # Verify installation
+                verify_result = subprocess.run(["git", "--version"], capture_output=True, text=True)
+                if verify_result.returncode == 0:
+                    print(f"✅ Git installed successfully: {verify_result.stdout.strip()}")
+                    return True
+                    
+            except (subprocess.CalledProcessError, FileNotFoundError):
+                continue
+        
+        print("❌ Could not install Git automatically.")
+        print("💡 Please install Git manually in your environment:")
+        print("   - Ubuntu/Debian: apt-get install git")
+        print("   - CentOS/RHEL: yum install git")
+        print("   - Alpine: apk add git")
+        return False
+        
+    except Exception as e:
+        print(f"❌ Error installing Git: {e}")
+        return False
+
 def test_git_connectivity():
     \"\"\"Test Git connectivity and certificate setup\"\"\"
     print("\\n🔧 Testing Git Configuration and Connectivity")
@@ -625,6 +675,11 @@ def test_basic_git_commands():
 def main():
     print("🔧 Bitbucket Git Transport Debug Tool")
     print("=" * 50)
+    
+    # Ensure Git is installed
+    if not ensure_git_installed():
+        print("❌ Git is required but not available. Please install Git and try again.")
+        sys.exit(1)
     
     # Test basic connection first
     if not test_bitbucket_connection():

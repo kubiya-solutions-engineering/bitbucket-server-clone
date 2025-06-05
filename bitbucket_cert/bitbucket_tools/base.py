@@ -9,6 +9,8 @@ class BitBucketCertTool(Tool):
             type="docker",
             image="python:3.12-slim",
             on_build="""
+apt-get update > /dev/null
+apt-get install -y git > /dev/null
 pip install requests > /dev/null
 pip install kubiya-sdk > /dev/null
             """,
