@@ -112,7 +112,7 @@ def clone_repository(project_key: str, repo_slug: str, destination: str = None, 
     Clone a repository from Bitbucket Server using client certificate authentication.
     
     Args:
-        project_key: The project key (e.g., 'EOCCJPA')
+        project_key: The project key (e.g., 'kubika2')
         repo_slug: The repository slug (e.g., 'kubikaos')
         destination: Local directory to clone into (optional)
         branch: Specific branch to clone (optional)
