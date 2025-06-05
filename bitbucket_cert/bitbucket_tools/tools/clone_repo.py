@@ -251,37 +251,8 @@ def migrate_bitbucket_to_github():
         
         print(f"✅ Successfully pushed to GitHub!")
         
-        # Step 7: Push all other branches and tags
-        print("\n🏷️ Step 7: Pushing all branches and tags...")
-        
-        # Get all local branches
-        success, branches_output = run_git_command(
-            ["git", "branch"]
-        )
-        
-        if success and branches_output:
-            branches = []
-            for line in branches_output.strip().split('\n'):
-                line = line.strip().replace('* ', '')  # Remove current branch indicator
-                if line and line != migration_branch:  # Don't include migration branch
-                    branches.append(line)
-            
-            print(f"📋 Found {len(branches)} branches to migrate")
-            
-            # Push each branch to GitHub
-            for branch in branches:
-                print(f"   📤 Pushing branch: {branch}")
-                success, output = run_git_command(
-                    ["git", "push", "github", f"{branch}:{branch}"]
-                )
-                
-                if success:
-                    print(f"   ✅ Pushed: {branch}")
-                else:
-                    print(f"   ⚠️ Failed to push {branch}: {output}")
-        
-        # Push all tags
-        print("🏷️ Pushing tags...")
+        # Push tags only (not the original branches)
+        print("\n🏷️ Pushing tags...")
         success, output = run_git_command(
             ["git", "push", "github", "--tags"]
         )
