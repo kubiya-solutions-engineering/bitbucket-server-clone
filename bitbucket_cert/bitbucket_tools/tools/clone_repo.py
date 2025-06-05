@@ -1,329 +1,195 @@
-import os
+#!/usr/bin/env python3
+"""
+Clone repository from Bitbucket Server using client certificate authentication.
+Updated to handle dual authentication (client certificates + basic auth).
+"""
+
 import subprocess
 import sys
-import json
-import tempfile
-from pathlib import Path
-from typing import Optional
+import os
+import shutil
+sys.path.append('/tmp')
 
-# Import from our bitbucket functions (the file is still named github_funcs.py but contains bitbucket functions)
 from github_funcs import (
     get_bitbucket_server_url,
-    setup_client_cert_files,
+    setup_git_with_dual_auth,
     test_bitbucket_connection
 )
 
-def setup_git_with_certificates() -> tuple:
-    """
-    Set up git configuration to use client certificates for HTTPS authentication.
-    Returns tuple of (cert_path, key_path) for cleanup later.
-    """
-    print("Setting up git with client certificates...")
-    
-    # Get certificate files
-    cert_path, key_path = setup_client_cert_files()
-    
-    # Configure git to use the certificates
-    # Note: This sets global git config, which might affect other git operations
-    try:
-        subprocess.run([
-            "git", "config", "--global", "http.sslCert", cert_path
-        ], check=True, capture_output=True, text=True)
-        
-        subprocess.run([
-            "git", "config", "--global", "http.sslKey", key_path
-        ], check=True, capture_output=True, text=True)
-        
-        # Disable SSL verification for the specific domain
-        server_url = get_bitbucket_server_url()
-        domain = server_url.replace("https://", "").replace("http://", "")
-        subprocess.run([
-            "git", "config", "--global", f"http.{server_url}.sslVerify", "false"
-        ], check=True, capture_output=True, text=True)
-        
-        print(f"✅ Git configured to use certificates for {domain}")
-        return cert_path, key_path
-        
-    except subprocess.CalledProcessError as e:
-        print(f"❌ Failed to configure git: {e}")
-        print(f"Error output: {e.stderr}")
-        raise RuntimeError(f"Failed to configure git: {e}")
-
-def cleanup_git_config():
-    """Clean up git configuration"""
-    try:
-        print("Cleaning up git configuration...")
-        subprocess.run([
-            "git", "config", "--global", "--unset", "http.sslCert"
-        ], capture_output=True, text=True)
-        
-        subprocess.run([
-            "git", "config", "--global", "--unset", "http.sslKey"
-        ], capture_output=True, text=True)
-        
-        # Clean up the SSL verification setting
-        server_url = get_bitbucket_server_url()
-        subprocess.run([
-            "git", "config", "--global", "--unset", f"http.{server_url}.sslVerify"
-        ], capture_output=True, text=True)
-        
-        print("✅ Git configuration cleaned up")
-        
-    except subprocess.CalledProcessError as e:
-        print(f"⚠️ Warning: Could not clean up git config: {e}")
-
-def get_clone_url(project_key: str, repo_slug: str) -> str:
-    """Get the HTTPS clone URL for a repository using direct URL construction"""
-    # Use direct URL construction since REST API is restricted
-    server_url = get_bitbucket_server_url()
-    https_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
-    print(f"Clone URL: {https_url}")
-    return https_url
-
-def test_repository_access(project_key: str, repo_slug: str) -> bool:
-    """Test if repository is accessible via Git operations"""
-    print(f"Testing access to repository {project_key}/{repo_slug}...")
-    
-    try:
-        # Set up certificates
-        setup_git_with_certificates()
-        
-        # Get clone URL
-        clone_url = get_clone_url(project_key, repo_slug)
-        
-        # Test git ls-remote (lightweight way to test access)
-        result = subprocess.run(
-            ["git", "ls-remote", "--heads", clone_url],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        
-        if result.returncode == 0:
-            branches = result.stdout.strip().split('\n') if result.stdout.strip() else []
-            print(f"✅ Repository accessible! Found {len(branches)} branches")
-            return True
-        else:
-            print(f"❌ Repository not accessible: {result.stderr}")
-            return False
-            
-    except subprocess.TimeoutExpired:
-        print("❌ Repository access test timed out (30s)")
-        return False
-    except Exception as e:
-        print(f"❌ Repository access test failed: {e}")
-        return False
-    finally:
-        cleanup_git_config()
-
 def clone_repository(project_key: str, repo_slug: str, destination: str = None, branch: str = None) -> bool:
     """
-    Clone a repository from Bitbucket Server using client certificate authentication.
+    Clone a repository from Bitbucket Server using dual authentication.
     
     Args:
-        project_key: The project key (e.g., 'kubika2')
-        repo_slug: The repository slug (e.g., 'kubikaos')
-        destination: Local directory to clone into (optional)
+        project_key: The project key (e.g., kubika2)
+        repo_slug: The repository slug (e.g., kubikaos)
+        destination: Local directory to clone into (defaults to repo_slug)
         branch: Specific branch to clone (optional)
     
     Returns:
         bool: True if successful, False otherwise
     """
+    print(f"🔄 Cloning {project_key}/{repo_slug} from Bitbucket...")
     
     # Test connection first
     if not test_bitbucket_connection():
-        print("❌ Failed to establish connection to Bitbucket. Please check your configuration.")
+        print("❌ Failed to establish connection to Bitbucket")
         return False
     
-    cert_path = None
-    key_path = None
-    
     try:
-        # Test repository access via Git instead of REST API
-        if not test_repository_access(project_key, repo_slug):
-            print("❌ Repository is not accessible via Git operations.")
-            return False
+        # Set up dual authentication
+        cert_path, key_path, username, password = setup_git_with_dual_auth()
         
-        print(f"✅ Repository {project_key}/{repo_slug} is accessible")
+        # Construct Git URL
+        server_url = get_bitbucket_server_url()
+        git_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
         
-        # Set up git with certificates
-        cert_path, key_path = setup_git_with_certificates()
+        # If we have username/password, embed them in the URL for authentication
+        if username and password:
+            print(f"🔐 Using dual authentication: client certificates + basic auth")
+            auth_git_url = git_url.replace("https://", f"https://{username}:{password}@")
+        else:
+            print(f"⚠️ Using client certificates only (may fail if server requires basic auth)")
+            auth_git_url = git_url
         
-        # Get clone URL
-        clone_url = get_clone_url(project_key, repo_slug)
-        
-        # Determine destination directory
+        # Set destination directory
         if not destination:
             destination = repo_slug
         
-        # Check if destination already exists
+        # Clean up existing directory if it exists
         if os.path.exists(destination):
-            print(f"⚠️ Directory '{destination}' already exists")
-            response = input("Do you want to remove it and continue? (y/N): ")
-            if response.lower() != 'y':
-                print("❌ Clone cancelled")
-                return False
-            
-            # Remove existing directory
-            import shutil
+            print(f"🧹 Removing existing directory: {destination}")
             shutil.rmtree(destination)
-            print(f"✅ Removed existing directory: {destination}")
         
-        # Prepare git clone command
+        # Prepare environment for Git
+        git_env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_SSL_NO_VERIFY": "1",
+            "GIT_SSL_CERT": cert_path,
+            "GIT_SSL_KEY": key_path,
+        }
+        
+        # Build git clone command
         clone_cmd = ["git", "clone"]
         
         if branch:
             clone_cmd.extend(["--branch", branch])
+            print(f"📋 Cloning specific branch: {branch}")
         
-        clone_cmd.extend([clone_url, destination])
+        clone_cmd.extend([auth_git_url, destination])
         
-        print(f"Cloning repository...")
-        print(f"Command: {' '.join(clone_cmd)}")
+        print(f"📥 Executing: git clone {git_url} {destination}")
+        if branch:
+            print(f"   Branch: {branch}")
         
-        # Execute git clone
+        # Execute clone
         result = subprocess.run(
             clone_cmd,
+            env=git_env,
             capture_output=True,
             text=True,
-            cwd=os.getcwd()
+            timeout=300  # 5 minute timeout for large repos
         )
         
         if result.returncode == 0:
-            print(f"✅ Repository cloned successfully to: {os.path.abspath(destination)}")
+            print(f"✅ Successfully cloned to: {destination}")
             
-            # Show some basic info about the cloned repo
+            # Get some info about the cloned repository
             try:
-                repo_path = os.path.abspath(destination)
-                result = subprocess.run(
-                    ["git", "log", "--oneline", "-5"],
-                    capture_output=True,
-                    text=True,
-                    cwd=repo_path
-                )
-                if result.returncode == 0:
-                    print(f"\nLast 5 commits:")
-                    for line in result.stdout.strip().split('\n'):
-                        if line:
-                            print(f"  {line}")
+                # Count files (excluding .git)
+                file_count = 0
+                for root, dirs, files in os.walk(destination):
+                    if '.git' not in root:
+                        file_count += len(files)
                 
-                # Show current branch
-                result = subprocess.run(
+                print(f"📊 Repository contains approximately {file_count} files")
+                
+                # Get current branch
+                branch_result = subprocess.run(
                     ["git", "branch", "--show-current"],
+                    cwd=destination,
                     capture_output=True,
-                    text=True,
-                    cwd=repo_path
+                    text=True
                 )
-                if result.returncode == 0:
-                    current_branch = result.stdout.strip()
-                    print(f"\nCurrent branch: {current_branch}")
-                    
+                
+                if branch_result.returncode == 0:
+                    current_branch = branch_result.stdout.strip()
+                    print(f"📍 Current branch: {current_branch}")
+                
             except Exception as e:
                 print(f"⚠️ Could not get repository info: {e}")
             
             return True
         else:
-            print(f"❌ Git clone failed with return code: {result.returncode}")
-            print(f"Error output: {result.stderr}")
-            print(f"Standard output: {result.stdout}")
+            print(f"❌ Clone failed!")
+            print(f"Error: {result.stderr}")
+            
+            # Provide helpful error diagnosis
+            if "401" in result.stderr:
+                print("💡 Authentication failed - this indicates:")
+                if username and password:
+                    print("   - Client certificates work but credentials may be incorrect")
+                    print("   - Check JIRA_USER_CREDS format: 'username:password'")
+                else:
+                    print("   - Server requires username/password in addition to client certificates")
+                    print("   - Set JIRA_USER_CREDS environment variable")
+            elif "timeout" in result.stderr.lower():
+                print("💡 Operation timed out - the repository may be very large")
+            elif "not found" in result.stderr.lower():
+                print("💡 Repository not found - check project key and repository slug")
+            
             return False
             
-    except Exception as e:
-        print(f"❌ Clone operation failed: {str(e)}")
+    except subprocess.TimeoutExpired:
+        print("❌ Clone operation timed out (5 minutes)")
         return False
-    
-    finally:
-        # Always clean up git configuration
-        cleanup_git_config()
-        
-        # Clean up certificate files
-        if cert_path and os.path.exists(cert_path):
-            try:
-                os.remove(cert_path)
-                print(f"✅ Cleaned up certificate file: {cert_path}")
-            except Exception as e:
-                print(f"⚠️ Could not remove certificate file: {e}")
-        
-        if key_path and os.path.exists(key_path):
-            try:
-                os.remove(key_path)
-                print(f"✅ Cleaned up key file: {key_path}")
-            except Exception as e:
-                print(f"⚠️ Could not remove key file: {e}")
-
-def list_known_repos():
-    """List known repositories that can be accessed"""
-    print("🔧 Known Bitbucket Repositories")
-    print("=" * 40)
-    
-    server_url = get_bitbucket_server_url()
-    print(f"Server: {server_url}")
-    
-    # Known repositories (can be expanded)
-    known_repos = [
-        ("kubika2", "kubikaos", "From customer URL"),
-        # Add more known repos here as discovered
-    ]
-    
-    print(f"\n📂 Known repositories:")
-    for project_key, repo_slug, description in known_repos:
-        git_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
-        print(f"- {project_key}/{repo_slug} ({description})")
-        print(f"  Git URL: {git_url}")
-    
-    print(f"\n💡 To test access to a repository, use:")
-    print(f"python clone_repo.py <project_key> <repo_slug> --list")
+    except Exception as e:
+        print(f"❌ Clone failed with error: {e}")
+        return False
 
 def main():
-    import argparse
-
-    parser = argparse.ArgumentParser(description="Clone repository from Bitbucket Server")
-    parser.add_argument("project_key", nargs='?', help="Project key (e.g., kubika2)")
-    parser.add_argument("repo_slug", nargs='?', help="Repository slug (e.g., kubikaos)")
-    parser.add_argument("--destination", "-d", help="Local directory to clone into (defaults to repo name)")
-    parser.add_argument("--branch", "-b", help="Specific branch to clone")
-    parser.add_argument("--list", "-l", action="store_true", help="List known repositories")
-    parser.add_argument("--test", "-t", action="store_true", help="Test repository access without cloning")
-    
-    args = parser.parse_args()
-    
-    if args.list:
-        list_known_repos()
-        return
-    
-    # Validate required arguments
-    if not args.project_key or not args.repo_slug:
-        print("❌ Both project_key and repo_slug are required")
-        parser.print_help()
+    """Main function for command-line usage"""
+    if len(sys.argv) < 3:
+        print("Usage: clone_repo.py <project_key> <repo_slug> [--destination=<path>] [--branch=<branch>]")
+        print("Example: clone_repo.py kubika2 kubikaos --destination=/tmp/kubikaos --branch=main")
         sys.exit(1)
     
-    if args.test:
-        print(f"Testing repository access: {args.project_key}/{args.repo_slug}")
-        success = test_repository_access(args.project_key, args.repo_slug)
-        if success:
-            print("✅ Repository access test passed")
-        else:
-            print("❌ Repository access test failed")
-            sys.exit(1)
-        return
+    project_key = sys.argv[1]
+    repo_slug = sys.argv[2]
     
-    print(f"Cloning repository: {args.project_key}/{args.repo_slug}")
-    if args.destination:
-        print(f"Destination: {args.destination}")
-    if args.branch:
-        print(f"Branch: {args.branch}")
+    # Parse optional arguments
+    destination = None
+    branch = None
     
-    success = clone_repository(
-        project_key=args.project_key,
-        repo_slug=args.repo_slug,
-        destination=args.destination,
-        branch=args.branch
-    )
+    for arg in sys.argv[3:]:
+        if arg.startswith("--destination="):
+            destination = arg.split("=", 1)[1]
+            if destination == "<no value>":
+                destination = None
+        elif arg.startswith("--branch="):
+            branch = arg.split("=", 1)[1]
+            if branch == "<no value>":
+                branch = None
     
-    if not success:
-        print("❌ Clone operation failed")
+    print("🚀 Bitbucket Repository Cloning Tool")
+    print("=" * 40)
+    print(f"Project: {project_key}")
+    print(f"Repository: {repo_slug}")
+    if destination:
+        print(f"Destination: {destination}")
+    if branch:
+        print(f"Branch: {branch}")
+    print("=" * 40)
+    
+    success = clone_repository(project_key, repo_slug, destination, branch)
+    
+    if success:
+        print("\n🎉 Clone completed successfully!")
+        sys.exit(0)
+    else:
+        print("\n❌ Clone failed!")
         sys.exit(1)
-    
-    print("✅ Clone operation completed successfully")
 
 if __name__ == "__main__":
     main() 

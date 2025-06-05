@@ -29,7 +29,7 @@ clone_repo_tool = BitBucketCertTool(
 # List repositories tool
 list_repos_tool = BitBucketCertTool(
     name="list_bitbucket_repos",
-    description="Test Git access to known Bitbucket repositories using HTTPS transport with enhanced client certificate authentication",
+    description="Test Git access to Bitbucket repositories with dual authentication (client certificates + basic auth)",
     content="""python /tmp/list_bitbucket_repos.py "{{ .project_key }}" "{{ .repo_slug }}" """,
     args=[
         Arg(name="project_key", type="str", description="Project key (e.g., kubika2)", required=False),
@@ -42,147 +42,99 @@ list_repos_tool = BitBucketCertTool(
 import sys
 import subprocess
 import os
-import tempfile
 sys.path.append('/tmp')
 
 from github_funcs import (
     get_bitbucket_server_url,
     setup_client_cert_files,
-    test_bitbucket_connection
+    test_bitbucket_connection,
+    setup_git_with_dual_auth,
+    test_git_dual_auth
 )
 
-def configure_git_advanced_auth(cert_path, key_path, server_url):
-    \"\"\"Configure Git with multiple authentication approaches for client certificates\"\"\"
-    print("🔧 Configuring Git with advanced client certificate authentication...")
+def diagnose_authentication_requirements():
+    \"\"\"Diagnose what authentication the server actually requires\"\"\"
+    print("🔍 Diagnosing Bitbucket Authentication Requirements")
+    print("-" * 50)
     
-    domain = "api.cip.audi.de"
-    
-    # Advanced Git configuration for client certificates
-    advanced_config = [
-        # Global SSL certificate configuration
-        ["git", "config", "--global", "http.sslCert", cert_path],
-        ["git", "config", "--global", "http.sslKey", key_path],
-        ["git", "config", "--global", "http.sslVerify", "false"],
-        ["git", "config", "--global", "http.sslCertPasswordProtected", "false"],
-        
-        # Domain-specific configuration
-        ["git", "config", "--global", f"http.https://{domain}/.sslCert", cert_path],
-        ["git", "config", "--global", f"http.https://{domain}/.sslKey", key_path],
-        ["git", "config", "--global", f"http.https://{domain}/.sslVerify", "false"],
-        ["git", "config", "--global", f"http.https://{domain}/.sslCertPasswordProtected", "false"],
-        
-        # Server-specific configuration
-        ["git", "config", "--global", f"http.{server_url}.sslCert", cert_path],
-        ["git", "config", "--global", f"http.{server_url}.sslKey", key_path],
-        ["git", "config", "--global", f"http.{server_url}.sslVerify", "false"],
-        ["git", "config", "--global", f"http.{server_url}.sslCertPasswordProtected", "false"],
-        
-        # Disable credential helpers and prompts
-        ["git", "config", "--global", "credential.helper", ""],
-        ["git", "config", "--global", "http.askpass", ""],
-        ["git", "config", "--global", "core.askpass", ""],
-        
-        # HTTP-specific settings
-        ["git", "config", "--global", "http.followRedirects", "true"],
-        ["git", "config", "--global", "http.emptyAuth", "true"],
-        
-        # Curl-specific settings for Git
-        ["git", "config", "--global", "http.curloptResolve", ""],
-        ["git", "config", "--global", "http.userAgent", "git/kubiya-client-cert"],
-    ]
-    
-    for cmd in advanced_config:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            print(f"  ✅ {' '.join(cmd[3:])}")
-        else:
-            print(f"  ⚠️  Failed: {' '.join(cmd[3:])}")
-    
-    return True
-
-def test_git_access_with_fallbacks(project_key, repo_slug):
-    \"\"\"Test Git access with multiple fallback approaches\"\"\"
-    server_url = get_bitbucket_server_url() 
-    git_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
-    
-    print(f"🔍 Testing Git access to: {project_key}/{repo_slug}")
-    print(f"Git URL: {git_url}")
+    server_url = get_bitbucket_server_url()
+    test_url = f"{server_url}/scm/kubika2/kubikaos.git/info/refs?service=git-upload-pack"
     
     try:
-        # Set up certificates
         cert_path, key_path = setup_client_cert_files()
         
-        # Configure Git with advanced settings
-        configure_git_advanced_auth(cert_path, key_path, server_url)
-        
-        # Method 1: Standard git ls-remote
-        print("\\n🔗 Method 1: Standard git ls-remote...")
-        git_env = {
-            **os.environ,
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_SSL_NO_VERIFY": "1",
-            "GIT_CURL_VERBOSE": "0",  # Reduce verbosity for first attempt
-            "GIT_SSL_CERT": cert_path,
-            "GIT_SSL_KEY": key_path,
-        }
-        
-        result = subprocess.run(
-            ["git", "ls-remote", "--heads", git_url],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=git_env
-        )
+        print("1️⃣ Testing client certificates only...")
+        result = subprocess.run([
+            "curl", "-s", "-I", "-w", "HTTP_CODE:%{http_code}\\n",
+            "--cert", cert_path,
+            "--key", key_path,
+            "-k",  # Allow insecure SSL
+            test_url
+        ], capture_output=True, text=True, timeout=10)
         
         if result.returncode == 0:
-            branches = result.stdout.strip().split('\\n') if result.stdout.strip() else []
-            print(f"✅ Success! Found {len(branches)} branches")
-            return True, branches
+            output = result.stdout
+            if "HTTP_CODE:200" in output:
+                print("   ✅ Client certificates alone are sufficient!")
+                return "client_cert_only"
+            elif "HTTP_CODE:401" in output:
+                print("   ❌ Client certificates alone are NOT sufficient")
+                if "WWW-Authenticate: Basic" in output:
+                    print("   💡 Server requires BASIC authentication in addition to client certificates")
+                    return "dual_auth_required"
+            else:
+                print(f"   ⚠️ Unexpected response: {output}")
         
-        print(f"❌ Method 1 failed: {result.stderr.strip()}")
+        print("2️⃣ Testing what credentials are available...")
+        user_email = os.getenv("KUBIYA_USER_EMAIL", "")
+        user_creds = os.getenv("JIRA_USER_CREDS", "")
         
-        # Method 2: Try with different Git command and environment
-        print("\\n🔗 Method 2: Git with libcurl backend...")
-        git_env["GIT_CURL_VERBOSE"] = "1"
+        print(f"   - User email: {'✅ Available' if user_email else '❌ Not set'}")
+        print(f"   - User credentials: {'✅ Available' if user_creds else '❌ Not set'}")
         
-        result = subprocess.run(
-            ["git", "-c", "http.version=HTTP/1.1", "ls-remote", "--heads", git_url],
-            capture_output=True,
-            text=True,
-            timeout=30,
-            env=git_env
-        )
-        
-        if result.returncode == 0:
-            branches = result.stdout.strip().split('\\n') if result.stdout.strip() else []
-            print(f"✅ Success with HTTP/1.1! Found {len(branches)} branches")
-            return True, branches
-        
-        print(f"❌ Method 2 failed: {result.stderr.strip()}")
-        
-        # Method 3: Try to set up a credential helper with certificates
-        print("\\n🔗 Method 3: Creating custom credential approach...")
-        
-        # Create a temporary Git config file
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.gitconfig', delete=False) as temp_config:
-            temp_config.write(f\"\"\"[http]
-    sslCert = {cert_path}
-    sslKey = {key_path}
-    sslVerify = false
-    sslCertPasswordProtected = false
-    
-[http "https://{get_bitbucket_server_url().replace('https://', '')}"]
-    sslCert = {cert_path}
-    sslKey = {key_path}
-    sslVerify = false
+        if user_creds and ":" in user_creds:
+            print("   💡 Credentials format looks correct (username:password)")
+            return "dual_auth_possible"
+        elif user_email:
+            print("   ⚠️ Only email available - may need explicit password")
+            return "partial_creds"
+        else:
+            print("   ❌ No user credentials available")
+            return "no_creds"
+            
+    except Exception as e:
+        print(f"   ❌ Diagnosis failed: {e}")
+        return "unknown"
 
-[credential]
-    helper = \"\"\")\n"
-            temp_config_path = temp_config.name
+def test_repository_access(project_key, repo_slug):
+    \"\"\"Test repository access with comprehensive approach\"\"\"
+    print(f"\\n🔗 Testing Repository Access: {project_key}/{repo_slug}")
+    print("-" * 50)
+    
+    # First, diagnose authentication requirements
+    auth_status = diagnose_authentication_requirements()
+    
+    print(f"\\n📋 Authentication Status: {auth_status}")
+    
+    if auth_status == "client_cert_only":
+        print("✅ Proceeding with client certificate authentication only...")
         
+        # Use standard client cert approach
         try:
+            cert_path, key_path = setup_client_cert_files()
+            server_url = get_bitbucket_server_url()
+            git_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
+            
+            git_env = {
+                **os.environ,
+                "GIT_TERMINAL_PROMPT": "0",
+                "GIT_SSL_NO_VERIFY": "1",
+                "GIT_SSL_CERT": cert_path,
+                "GIT_SSL_KEY": key_path,
+            }
+            
             result = subprocess.run(
-                ["git", "-c", f"include.path={temp_config_path}", "ls-remote", "--heads", git_url],
+                ["git", "ls-remote", "--heads", git_url],
                 capture_output=True,
                 text=True,
                 timeout=30,
@@ -191,69 +143,48 @@ def test_git_access_with_fallbacks(project_key, repo_slug):
             
             if result.returncode == 0:
                 branches = result.stdout.strip().split('\\n') if result.stdout.strip() else []
-                print(f"✅ Success with custom config! Found {len(branches)} branches")
                 return True, branches
-            
-            print(f"❌ Method 3 failed: {result.stderr.strip()}")
-            
-        finally:
-            os.unlink(temp_config_path)
-        
-        # Method 4: Analyze the authentication challenge
-        print("\\n🔍 Method 4: Analyzing authentication requirements...")
-        
-        # Check if we can get more details about what the server expects
-        try:
-            print("Testing with curl to understand server requirements...")
-            curl_result = subprocess.run([
-                "curl", "-v", "-I",  # HEAD request with verbose output
-                "--cert", cert_path,
-                "--key", key_path,
-                "-k",  # Allow insecure SSL
-                "--connect-timeout", "10",
-                git_url + "/info/refs?service=git-upload-pack"
-            ], capture_output=True, text=True, timeout=15)
-            
-            print("Curl output (headers only):")
-            if curl_result.stderr:
-                lines = curl_result.stderr.split('\\n')
-                for line in lines:
-                    if 'HTTP/' in line or 'WWW-Authenticate' in line or 'Authorization' in line:
-                        print(f"  {line}")
-            
-            if "200 OK" in curl_result.stderr:
-                print("💡 Curl shows 200 OK - client certificates work at HTTP level")
-                print("💡 Issue is likely with Git's handling of the authentication flow")
-            elif "401" in curl_result.stderr:
-                print("💡 Server requires additional authentication beyond client certificates")
-                if "WWW-Authenticate: Basic" in curl_result.stderr:
-                    print("💡 Server expects BOTH client cert AND Basic auth (username/password)")
-            
+            else:
+                print(f"❌ Failed: {result.stderr}")
+                return False, []
+                
         except Exception as e:
-            print(f"Could not analyze with curl: {e}")
+            print(f"❌ Error: {e}")
+            return False, []
+    
+    elif auth_status in ["dual_auth_required", "dual_auth_possible"]:
+        print("🔐 Attempting dual authentication (client cert + basic auth)...")
         
-        return False, []
+        # Use the new dual authentication approach
+        success, branches = test_git_dual_auth(project_key, repo_slug)
+        return success, branches
+    
+    else:
+        print("❌ Cannot proceed - authentication requirements not met")
+        print("\\n💡 Required for Git operations:")
+        print("  1. ✅ Client certificates (available)")
+        if auth_status in ["dual_auth_required", "partial_creds", "no_creds"]:
+            print("  2. ❌ Username and password (missing or incomplete)")
+            print("\\n🔧 To fix this:")
+            print("  - Ensure JIRA_USER_CREDS environment variable is set")
+            print("  - Format: 'username:password'")
+            print("  - Contact Audi IT for your Bitbucket username/password")
         
-    except subprocess.TimeoutExpired:
-        print("❌ Git operation timed out (30s)")
-        return False, []
-    except Exception as e:
-        print(f"❌ Git test failed: {e}")
         return False, []
 
 def main():
     project_key = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] != "<no value>" else None
     repo_slug = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] != "<no value>" else None
     
-    print("🔧 Enhanced Bitbucket Git Access Test")
-    print("=" * 40)
+    print("🔧 Bitbucket Dual Authentication Test")
+    print("=" * 50)
     
     # Test basic connection first
     if not test_bitbucket_connection():
         print("❌ Failed to establish basic connection to Bitbucket. Please check your configuration.")
         sys.exit(1)
     
-    print("✅ Basic connection works. Testing Git access with enhanced methods...")
+    print("✅ Basic connection works.")
     
     # Known repositories to test
     test_repos = []
@@ -267,12 +198,12 @@ def main():
             ("kubika2", "kubikaos"),  # From customer URL
         ]
     
-    print(f"\\nTesting {len(test_repos)} repository(ies) with enhanced authentication...")
+    print(f"\\nTesting {len(test_repos)} repository(ies) with comprehensive authentication...")
     
     success_count = 0
     for proj_key, repo_name in test_repos:
-        print("\\n" + "-" * 60)
-        success, branches = test_git_access_with_fallbacks(proj_key, repo_name)
+        print("\\n" + "=" * 60)
+        success, branches = test_repository_access(proj_key, repo_name)
         if success:
             success_count += 1
             print("\\n✅ Repository accessible! Branches found:")
@@ -287,23 +218,22 @@ def main():
                 print(f"  ... and {len(branches) - 5} more branches")
     
     print("\\n" + "=" * 60)
-    print(f"🎯 Summary: {success_count}/{len(test_repos)} repositories accessible via Git")
+    print(f"🎯 FINAL RESULT: {success_count}/{len(test_repos)} repositories accessible")
     
     if success_count > 0:
-        print("✅ Git HTTPS transport is working with your certificates!")
-        print("💡 You can proceed with Git operations (clone, migration, etc.)")
+        print("✅ SUCCESS: Git operations will work!")
+        print("💡 You can proceed with cloning and migration")
     else:
-        print("❌ No repositories accessible via Git")
-        print("\\n🔍 Analysis based on server response:")
-        print("- Client certificates are valid (curl works)")
-        print("- Server responds with 401 + Basic auth requirement")
-        print("- This suggests dual authentication may be required:")
-        print("  1. Client certificates (for server/network level)")
-        print("  2. Username/password (for application level)")
-        print("\\n💡 Possible solutions:")
-        print("- Contact Audi IT to verify Git authentication requirements")  
-        print("- Check if additional user credentials are needed for Git operations")
-        print("- Verify repository permissions for your certificate identity")
+        print("❌ FAILED: Git operations require additional setup")
+        print("\\n📋 Summary of findings:")
+        print("- ✅ Client certificates: Working")
+        print("- ✅ Network connectivity: Working") 
+        print("- ❌ Git authentication: Requires username/password")
+        print("\\n🔧 Next steps:")
+        print("1. Obtain Bitbucket username/password from Audi IT")
+        print("2. Set JIRA_USER_CREDS environment variable: 'username:password'")
+        print("3. Re-run this test")
+        print("\\nNote: This is a common enterprise setup requiring dual authentication")
 
 if __name__ == "__main__":
     main()

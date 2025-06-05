@@ -365,5 +365,156 @@ def example_usage():
     except Exception as e:
         logger.error(f"Example usage failed: {e}")
 
+def setup_git_with_dual_auth():
+    """
+    Set up Git to handle dual authentication: client certificates + basic auth.
+    This addresses the specific issue where Bitbucket requires both SSL client certificates
+    and username/password authentication.
+    """
+    import subprocess
+    import tempfile
+    import os
+    
+    # Set up client certificates
+    cert_path, key_path = setup_client_cert_files()
+    server_url = get_bitbucket_server_url()
+    domain = "api.cip.audi.de"
+    
+    # Try to get user credentials from environment
+    user_email = os.getenv("KUBIYA_USER_EMAIL", "")
+    user_creds = os.getenv("JIRA_USER_CREDS", "")  # Format: "username:password"
+    
+    logger.info("Setting up Git with dual authentication (client cert + basic auth)")
+    logger.info(f"User email from env: {user_email}")
+    logger.info(f"User credentials available: {bool(user_creds)}")
+    
+    # Parse user credentials if available
+    username, password = "", ""
+    if user_creds and ":" in user_creds:
+        try:
+            username, password = user_creds.split(":", 1)
+            logger.info(f"Parsed username: {username}")
+        except:
+            logger.warning("Could not parse JIRA_USER_CREDS")
+    elif user_email:
+        # Use email as username if no explicit credentials
+        username = user_email.split("@")[0] if "@" in user_email else user_email
+        logger.info(f"Using email-derived username: {username}")
+    
+    # Configure Git with client certificates
+    git_configs = [
+        # Global SSL certificate configuration
+        ["git", "config", "--global", "http.sslCert", cert_path],
+        ["git", "config", "--global", "http.sslKey", key_path],
+        ["git", "config", "--global", "http.sslVerify", "false"],
+        ["git", "config", "--global", "http.sslCertPasswordProtected", "false"],
+        
+        # Domain-specific configuration
+        ["git", "config", "--global", f"http.https://{domain}/.sslCert", cert_path],
+        ["git", "config", "--global", f"http.https://{domain}/.sslKey", key_path],
+        ["git", "config", "--global", f"http.https://{domain}/.sslVerify", "false"],
+        
+        # Server-specific configuration  
+        ["git", "config", "--global", f"http.{server_url}.sslCert", cert_path],
+        ["git", "config", "--global", f"http.{server_url}.sslKey", key_path],
+        ["git", "config", "--global", f"http.{server_url}.sslVerify", "false"],
+        
+        # HTTP settings
+        ["git", "config", "--global", "http.followRedirects", "true"],
+        ["git", "config", "--global", "http.userAgent", "git/kubiya-dual-auth"],
+    ]
+    
+    for cmd in git_configs:
+        subprocess.run(cmd, capture_output=True, text=True)
+    
+    # Create a credential helper if we have username/password
+    if username and password:
+        logger.info("Creating credential helper for basic authentication")
+        
+        # Create credential helper script
+        credential_helper_content = f"""#!/bin/bash
+# Credential helper for Bitbucket dual authentication
+if [ "$1" = "get" ]; then
+    echo "username={username}"
+    echo "password={password}"
+fi
+"""
+        
+        credential_helper_path = "/tmp/git-credential-bitbucket"
+        with open(credential_helper_path, 'w') as f:
+            f.write(credential_helper_content)
+        os.chmod(credential_helper_path, 0o755)
+        
+        # Configure Git to use the credential helper
+        subprocess.run([
+            "git", "config", "--global", "credential.helper", 
+            f"!{credential_helper_path}"
+        ], capture_output=True, text=True)
+        
+        logger.info("Credential helper configured")
+        return cert_path, key_path, username, password
+    else:
+        logger.warning("No username/password available - Git may fail with 401")
+        return cert_path, key_path, None, None
+
+def test_git_dual_auth(project_key, repo_slug):
+    """
+    Test Git access with dual authentication setup
+    """
+    server_url = get_bitbucket_server_url()
+    git_url = f"{server_url}/scm/{project_key}/{repo_slug}.git"
+    
+    logger.info(f"Testing Git dual authentication for {project_key}/{repo_slug}")
+    logger.info(f"Git URL: {git_url}")
+    
+    try:
+        # Set up dual authentication
+        cert_path, key_path, username, password = setup_git_with_dual_auth()
+        
+        # Prepare environment
+        git_env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_SSL_NO_VERIFY": "1",
+            "GIT_SSL_CERT": cert_path,
+            "GIT_SSL_KEY": key_path,
+        }
+        
+        if username and password:
+            # Add credentials to URL for this test
+            auth_url = git_url.replace("https://", f"https://{username}:{password}@")
+            logger.info("Testing with embedded credentials in URL")
+            
+            result = subprocess.run(
+                ["git", "ls-remote", "--heads", auth_url],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=git_env
+            )
+        else:
+            logger.info("Testing without credentials (will likely fail)")
+            result = subprocess.run(
+                ["git", "ls-remote", "--heads", git_url],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=git_env
+            )
+        
+        if result.returncode == 0:
+            branches = result.stdout.strip().split('\n') if result.stdout.strip() else []
+            logger.info(f"Success! Found {len(branches)} branches")
+            return True, branches
+        else:
+            logger.error(f"Git failed: {result.stderr}")
+            if "401" in result.stderr:
+                logger.error("Still receiving 401 - check credentials or server configuration")
+            return False, []
+            
+    except Exception as e:
+        logger.error(f"Git dual auth test failed: {e}")
+        return False, []
+
 if __name__ == "__main__":
     example_usage() 
