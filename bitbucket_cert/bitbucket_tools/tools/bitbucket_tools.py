@@ -62,22 +62,31 @@ def test_git_access(project_key, repo_slug):
         # Set up git with certificates (similar to clone_repo.py)
         cert_path, key_path = setup_client_cert_files()
         
-        # Configure git to use certificates temporarily
+        # Configure git to use certificates and avoid username/password prompts
         temp_git_config = [
             ["git", "config", "--global", "http.sslCert", cert_path],
             ["git", "config", "--global", "http.sslKey", key_path], 
-            ["git", "config", "--global", f"http.{server_url}.sslVerify", "false"]
+            ["git", "config", "--global", f"http.{server_url}.sslVerify", "false"],
+            ["git", "config", "--global", f"http.{server_url}.sslCertPasswordProtected", "false"],
+            ["git", "config", "--global", "credential.helper", ""],  # Disable credential helper
+            ["git", "config", "--global", "http.askpass", ""],  # Disable askpass
         ]
         
         for cmd in temp_git_config:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            if result.returncode != 0:
+                print(f"⚠️ Git config warning: {' '.join(cmd[2:])}")
+        
+        print("✅ Git configured for client certificate authentication")
         
         # Test git ls-remote (lightweight way to test access)
+        print("🔗 Testing git ls-remote...")
         result = subprocess.run(
             ["git", "ls-remote", "--heads", git_url],
             capture_output=True,
             text=True,
-            timeout=30
+            timeout=30,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}  # Disable terminal prompts
         )
         
         if result.returncode == 0:
@@ -96,6 +105,9 @@ def test_git_access(project_key, repo_slug):
         else:
             print(f"❌ Git access failed:")
             print(f"Error: {result.stderr}")
+            if "Username" in result.stderr:
+                print("💡 Issue: Git is trying to use username/password instead of client certificates")
+                print("💡 This suggests the client certificate authentication isn't working as expected")
             return False
             
     except subprocess.TimeoutExpired:
@@ -482,56 +494,6 @@ from github_funcs import (
     test_bitbucket_connection
 )
 
-def ensure_git_installed():
-    \"\"\"Ensure Git is installed in the environment\"\"\"
-    try:
-        # Check if git is already available
-        result = subprocess.run(["git", "--version"], capture_output=True, text=True)
-        if result.returncode == 0:
-            print(f"✅ Git is available: {result.stdout.strip()}")
-            return True
-    except FileNotFoundError:
-        pass
-    
-    print("🔧 Git not found. Installing Git...")
-    
-    try:
-        # Try different package managers
-        install_commands = [
-            ["apt-get", "update", "&&", "apt-get", "install", "-y", "git"],
-            ["yum", "install", "-y", "git"],
-            ["apk", "add", "git"],
-        ]
-        
-        for cmd in install_commands:
-            try:
-                if cmd[0] == "apt-get":
-                    # For apt-get, run update first, then install
-                    subprocess.run(["apt-get", "update"], check=True, capture_output=True)
-                    result = subprocess.run(["apt-get", "install", "-y", "git"], check=True, capture_output=True)
-                else:
-                    result = subprocess.run(cmd, check=True, capture_output=True)
-                
-                # Verify installation
-                verify_result = subprocess.run(["git", "--version"], capture_output=True, text=True)
-                if verify_result.returncode == 0:
-                    print(f"✅ Git installed successfully: {verify_result.stdout.strip()}")
-                    return True
-                    
-            except (subprocess.CalledProcessError, FileNotFoundError):
-                continue
-        
-        print("❌ Could not install Git automatically.")
-        print("💡 Please install Git manually in your environment:")
-        print("   - Ubuntu/Debian: apt-get install git")
-        print("   - CentOS/RHEL: yum install git")
-        print("   - Alpine: apk add git")
-        return False
-        
-    except Exception as e:
-        print(f"❌ Error installing Git: {e}")
-        return False
-
 def test_git_connectivity():
     \"\"\"Test Git connectivity and certificate setup\"\"\"
     print("\\n🔧 Testing Git Configuration and Connectivity")
@@ -547,12 +509,15 @@ def test_git_connectivity():
         print(f"  - Cert: {cert_path} ({os.path.getsize(cert_path)} bytes)")
         print(f"  - Key: {key_path} ({os.path.getsize(key_path)} bytes)")
         
-        # Configure git
+        # Configure git with enhanced client certificate settings
         print("\\n🔧 Configuring Git with certificates...")
         git_config_commands = [
             ["git", "config", "--global", "http.sslCert", cert_path],
             ["git", "config", "--global", "http.sslKey", key_path], 
-            ["git", "config", "--global", f"http.{server_url}.sslVerify", "false"]
+            ["git", "config", "--global", f"http.{server_url}.sslVerify", "false"],
+            ["git", "config", "--global", f"http.{server_url}.sslCertPasswordProtected", "false"],
+            ["git", "config", "--global", "credential.helper", ""],  # Disable credential helper
+            ["git", "config", "--global", "http.askpass", ""],  # Disable askpass
         ]
         
         for cmd in git_config_commands:
@@ -595,7 +560,8 @@ def test_git_operations():
                 ["git", "ls-remote", "--heads", git_url],
                 capture_output=True,
                 text=True,
-                timeout=30
+                timeout=30,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}  # Disable terminal prompts
             )
             
             if result.returncode == 0:
@@ -615,6 +581,8 @@ def test_git_operations():
                 print(f"   ❌ Failed: {result.stderr.strip()}")
                 if "authentication" in result.stderr.lower():
                     print("   💡 Suggestion: Check certificate permissions")
+                elif "username" in result.stderr.lower():
+                    print("   💡 Issue: Git trying to use username/password instead of client certificates")
                 elif "timeout" in result.stderr.lower():
                     print("   💡 Suggestion: Check network connectivity")
                 elif "not found" in result.stderr.lower():
@@ -675,11 +643,6 @@ def test_basic_git_commands():
 def main():
     print("🔧 Bitbucket Git Transport Debug Tool")
     print("=" * 50)
-    
-    # Ensure Git is installed
-    if not ensure_git_installed():
-        print("❌ Git is required but not available. Please install Git and try again.")
-        sys.exit(1)
     
     # Test basic connection first
     if not test_bitbucket_connection():
