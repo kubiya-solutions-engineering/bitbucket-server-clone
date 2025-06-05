@@ -110,7 +110,7 @@ def migrate_bitbucket_to_github():
         
         # Clone from Bitbucket
         success, output = run_git_command(
-            ["git", "clone", "--mirror", auth_bitbucket_url, repo_dir],
+            ["git", "clone", auth_bitbucket_url, repo_dir],  # Regular clone, not --mirror
             timeout=600  # 10 minutes for large repos
         )
         
@@ -125,6 +125,63 @@ def migrate_bitbucket_to_github():
         
         # Change to repo directory
         os.chdir(repo_dir)
+        
+        # Fetch all remote branches to make them available locally
+        print("📡 Fetching all remote branches...")
+        success, output = run_git_command(
+            ["git", "fetch", "origin"]
+        )
+        
+        # Get all remote branches and create local tracking branches
+        success, branches_output = run_git_command(
+            ["git", "branch", "-r"]
+        )
+        
+        if success and branches_output:
+            remote_branches = []
+            for line in branches_output.strip().split('\n'):
+                line = line.strip()
+                if line and not line.startswith('origin/HEAD') and line.startswith('origin/'):
+                    branch_name = line.replace('origin/', '')
+                    if branch_name != 'HEAD':  # Skip HEAD reference
+                        remote_branches.append(branch_name)
+            
+            print(f"📋 Found {len(remote_branches)} remote branches")
+            
+            # Get current local branches to avoid conflicts
+            success, local_branches_output = run_git_command(
+                ["git", "branch"]
+            )
+            
+            local_branches = []
+            if success and local_branches_output:
+                for line in local_branches_output.strip().split('\n'):
+                    branch = line.strip().replace('* ', '')
+                    if branch:
+                        local_branches.append(branch)
+            
+            # Create local tracking branches for remote branches that don't exist locally
+            for branch in remote_branches:
+                if branch not in local_branches:
+                    print(f"   🌿 Creating local branch: {branch}")
+                    success, output = run_git_command(
+                        ["git", "checkout", "-b", branch, f"origin/{branch}"]
+                    )
+                    if not success:
+                        print(f"   ⚠️ Could not create branch {branch}: {output}")
+                else:
+                    print(f"   ✅ Branch {branch} already exists locally")
+        
+        # Get current branch
+        success, current_branch_output = run_git_command(
+            ["git", "branch", "--show-current"]
+        )
+        
+        if success and current_branch_output:
+            current_branch = current_branch_output.strip()
+            print(f"📍 Current branch: {current_branch}")
+        else:
+            print("⚠️ Could not determine current branch")
         
         # Create authenticated GitHub URL
         auth_github_url = GITHUB_REPO.replace(
@@ -197,33 +254,31 @@ def migrate_bitbucket_to_github():
         # Step 7: Push all other branches and tags
         print("\n🏷️ Step 7: Pushing all branches and tags...")
         
-        # Get all remote branches from the mirror clone
+        # Get all local branches
         success, branches_output = run_git_command(
-            ["git", "branch", "-r"]
+            ["git", "branch"]
         )
         
         if success and branches_output:
             branches = []
             for line in branches_output.strip().split('\n'):
-                line = line.strip()
-                if line and not line.startswith('origin/HEAD'):
-                    branch_name = line.replace('origin/', '')
-                    branches.append(branch_name)
+                line = line.strip().replace('* ', '')  # Remove current branch indicator
+                if line and line != migration_branch:  # Don't include migration branch
+                    branches.append(line)
             
             print(f"📋 Found {len(branches)} branches to migrate")
             
-            # Push each branch
+            # Push each branch to GitHub
             for branch in branches:
-                if branch != migration_branch:  # Don't push migration branch again
-                    print(f"   📤 Pushing branch: {branch}")
-                    success, output = run_git_command(
-                        ["git", "push", "github", f"origin/{branch}:refs/heads/{branch}"]
-                    )
-                    
-                    if success:
-                        print(f"   ✅ Pushed: {branch}")
-                    else:
-                        print(f"   ⚠️ Failed to push {branch}: {output}")
+                print(f"   📤 Pushing branch: {branch}")
+                success, output = run_git_command(
+                    ["git", "push", "github", f"{branch}:{branch}"]
+                )
+                
+                if success:
+                    print(f"   ✅ Pushed: {branch}")
+                else:
+                    print(f"   ⚠️ Failed to push {branch}: {output}")
         
         # Push all tags
         print("🏷️ Pushing tags...")
