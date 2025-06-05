@@ -1,11 +1,11 @@
 import inspect
 from typing import List
 from kubiya_sdk.tools import Arg, FileSpec
-from ..base import JiraCertTool, register_jira_tool
+from ..base import BitBucketCertTool, register_bitbucket_tool
 from . import clone_repo, github_funcs
 
 # Clone repository tool
-clone_repo_tool = JiraCertTool(
+clone_repo_tool = BitBucketCertTool(
     name="clone_repo",
     description="Clone a repository from Bitbucket Server using client certificate authentication",
     content="""python /tmp/clone_repo.py "{{ .project_key }}" "{{ .repo_slug }}" --destination="{{ .destination }}" --branch="{{ .branch }}" """,
@@ -27,7 +27,7 @@ clone_repo_tool = JiraCertTool(
     ])
 
 # List repositories tool
-list_repos_tool = JiraCertTool(
+list_repos_tool = BitBucketCertTool(
     name="list_bitbucket_repos",
     description="List available repositories in Bitbucket Server",
     content="""python /tmp/list_bitbucket_repos.py "{{ .project_key }}" """,
@@ -111,7 +111,7 @@ if __name__ == "__main__":
     ])
 
 # Test Bitbucket connection tool
-test_bitbucket_tool = JiraCertTool(
+test_bitbucket_tool = BitBucketCertTool(
     name="test_bitbucket_connection",
     description="Test connection to Bitbucket Server with client certificates",
     content="python /tmp/test_bitbucket.py",
@@ -145,7 +145,7 @@ if __name__ == "__main__":
     ])
 
 # Get repository info tool
-get_repo_info_tool = JiraCertTool(
+get_repo_info_tool = BitBucketCertTool(
     name="get_bitbucket_repo_info",
     description="Get detailed information about a specific Bitbucket repository",
     content="""python /tmp/get_repo_info.py "{{ .project_key }}" "{{ .repo_slug }}" """,
@@ -239,7 +239,7 @@ if __name__ == "__main__":
     ])
 
 # List projects tool
-list_projects_tool = JiraCertTool(
+list_projects_tool = BitBucketCertTool(
     name="list_bitbucket_projects",
     description="List all accessible Bitbucket projects",
     content="python /tmp/list_bitbucket_projects.py",
@@ -291,7 +291,7 @@ if __name__ == "__main__":
 
 # Register all tools
 [
-    register_jira_tool(tool) for tool in [
+    register_bitbucket_tool(tool) for tool in [
         clone_repo_tool,
         list_repos_tool,
         test_bitbucket_tool,
