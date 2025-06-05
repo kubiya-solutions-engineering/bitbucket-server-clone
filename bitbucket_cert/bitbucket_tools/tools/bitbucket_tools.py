@@ -59,34 +59,66 @@ def test_git_access(project_key, repo_slug):
     print(f"Git URL: {git_url}")
     
     try:
-        # Set up git with certificates (similar to clone_repo.py)
+        # Set up git with certificates
         cert_path, key_path = setup_client_cert_files()
         
-        # Configure git to use certificates and avoid username/password prompts
-        temp_git_config = [
+        # Try multiple Git configuration approaches for client certificates
+        print("🔧 Configuring Git for client certificate authentication...")
+        
+        # Method 1: Standard Git SSL configuration
+        basic_config = [
             ["git", "config", "--global", "http.sslCert", cert_path],
             ["git", "config", "--global", "http.sslKey", key_path], 
             ["git", "config", "--global", f"http.{server_url}.sslVerify", "false"],
             ["git", "config", "--global", f"http.{server_url}.sslCertPasswordProtected", "false"],
-            ["git", "config", "--global", "credential.helper", ""],  # Disable credential helper
-            ["git", "config", "--global", "http.askpass", ""],  # Disable askpass
+            ["git", "config", "--global", "credential.helper", ""],
+            ["git", "config", "--global", "http.askpass", ""],
         ]
         
-        for cmd in temp_git_config:
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-            if result.returncode != 0:
-                print(f"⚠️ Git config warning: {' '.join(cmd[2:])}")
+        for cmd in basic_config:
+            subprocess.run(cmd, capture_output=True, text=True)
+        
+        # Method 2: Domain-specific certificate configuration
+        domain = "api.cip.audi.de"
+        domain_config = [
+            ["git", "config", "--global", f"http.https://{domain}/.sslCert", cert_path],
+            ["git", "config", "--global", f"http.https://{domain}/.sslKey", key_path],
+            ["git", "config", "--global", f"http.https://{domain}/.sslVerify", "false"],
+        ]
+        
+        for cmd in domain_config:
+            subprocess.run(cmd, capture_output=True, text=True)
         
         print("✅ Git configured for client certificate authentication")
         
-        # Test git ls-remote (lightweight way to test access)
-        print("🔗 Testing git ls-remote...")
+        # Set up environment variables for SSL/TLS
+        git_env = {
+            **os.environ,
+            "GIT_TERMINAL_PROMPT": "0",
+            "GIT_SSL_NO_VERIFY": "1",
+            "GIT_CURL_VERBOSE": "1",  # For debugging
+        }
+        
+        # Try to add certificate to environment if possible
+        try:
+            with open(cert_path, 'r') as f:
+                cert_content = f.read()
+            with open(key_path, 'r') as f:
+                key_content = f.read()
+            
+            git_env["GIT_SSL_CERT"] = cert_path
+            git_env["GIT_SSL_KEY"] = key_path
+        except:
+            pass
+        
+        # Test git ls-remote with enhanced environment
+        print("🔗 Testing git ls-remote with client certificates...")
         result = subprocess.run(
             ["git", "ls-remote", "--heads", git_url],
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"}  # Disable terminal prompts
+            env=git_env
         )
         
         if result.returncode == 0:
@@ -104,10 +136,40 @@ def test_git_access(project_key, repo_slug):
             return True
         else:
             print(f"❌ Git access failed:")
-            print(f"Error: {result.stderr}")
-            if "Username" in result.stderr:
-                print("💡 Issue: Git is trying to use username/password instead of client certificates")
-                print("💡 This suggests the client certificate authentication isn't working as expected")
+            print(f"STDERR: {result.stderr}")
+            if result.stdout:
+                print(f"STDOUT: {result.stdout}")
+                
+            if "Username" in result.stderr or "username" in result.stderr:
+                print("💡 Issue: Git is still trying to use username/password authentication")
+                print("💡 This suggests client certificate authentication may not be supported")
+                print("💡 or configured correctly for this Git/Bitbucket setup")
+            elif "SSL certificate" in result.stderr:
+                print("💡 Issue: SSL certificate problem")
+            elif "fatal: unable to access" in result.stderr:
+                print("💡 Issue: Network or authentication problem")
+            
+            # Try alternative approach: test if we can reach the server differently
+            print("\\n🔍 Testing alternative approaches...")
+            
+            # Try with curl to see if client cert works at all
+            try:
+                print("Testing with curl...")
+                curl_result = subprocess.run([
+                    "curl", "-v", "-k", 
+                    "--cert", cert_path,
+                    "--key", key_path,
+                    "--connect-timeout", "10",
+                    git_url
+                ], capture_output=True, text=True, timeout=15)
+                
+                if curl_result.returncode == 0:
+                    print("✅ Curl with client certificates works!")
+                else:
+                    print(f"❌ Curl also failed: {curl_result.stderr[:200]}...")
+            except:
+                print("⚠️ Could not test with curl")
+            
             return False
             
     except subprocess.TimeoutExpired:
